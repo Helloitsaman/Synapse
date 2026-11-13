@@ -1,0 +1,58 @@
+/* SYNAPSE design tokens — neon cyberpunk operations console.
+   Dark near-black/plum surfaces, violet + hot-magenta edges, restrained
+   green/cyan status lights. Glow is used sparingly to protect legibility. */
+:root {
+  /* Surfaces */
+  --bg-0: #08060e; /* app background, near-black plum */
+  --bg-1: #0e0a1a; /* panel background */
+  --bg-2: #140d24; /* raised panel / header */
+  --bg-3: #1b1232; /* hover / inset */
+  --bg-terminal: #0a0712;
+
+  /* Edges */
+  --edge: #2a1d47;
+  --edge-strong: #3d2a66;
+  --edge-violet: #6f3bd6;
+  --edge-magenta: #ff3df0;
+
+  /* Brand accents */
+  --violet: #b478ff;
+  --violet-dim: #8a5cff;
+  --magenta: #ff43e0;
+  --magenta-dim: #c42fb0;
+
+  /* Status */
+  --ok: #37f5b3;
+  --ok-dim: #16b98a;
+  --cyan: #46e6ff;
+  --warn: #ffcf4a;
+  --danger: #ff5b6e;
+  --idle: #6b5f86;
+
+  /* Text */
+  --text-0: #f2ecff; /* primary */
+  --text-1: #c7bce0; /* secondary */
+  --text-2: #8f82ad; /* muted */
+  --text-3: #6a5f87; /* faint */
+
+  /* Semantic measurement labels */
+  --label-measured: #46e6ff;
+  --label-estimated: #ffcf4a;
+  --label-simulated: #b478ff;
+  --label-provider: #37f5b3;
+
+  /* Typography */
+  --font-mono: "JetBrains Mono", "SFMono-Regular", "Consolas", "Liberation Mono",
+    monospace;
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    sans-serif;
+
+  /* Radius / spacing */
+  --r-sm: 4px;
+  --r-md: 7px;
+  --r-lg: 12px;
+  --glow-violet: 0 0 0 1px rgba(111, 59, 214, 0.5), 0 0 16px rgba(132, 70, 255, 0.18);
+  --glow-magenta: 0 0 0 1px rgba(255, 61, 240, 0.4), 0 0 18px rgba(255, 61, 240, 0.16);
+
+  --shadow-panel: 0 18px 40px -22px rgba(0, 0, 0, 0.9);
+}

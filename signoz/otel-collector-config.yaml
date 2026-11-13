@@ -1,0 +1,30 @@
+# OpenTelemetry Collector config.
+# Receives OTLP from SYNAPSE on 4317 (gRPC) / 4318 (HTTP) and logs a summary of
+# received spans/metrics to stdout — a quick way to confirm SYNAPSE's telemetry
+# export works. To send to a real SigNoz instance, add an otlp exporter pointing
+# at the SigNoz collector and include it in the pipelines (see signoz/README.md).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

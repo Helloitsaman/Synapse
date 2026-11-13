@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "support-triage",
+  "name": "Support Ticket Triage",
+  "description": "Example workflow imported from an external agent framework and mapped onto the SYNAPSE schema. Two independent enrichment branches feed a drafting step.",
+  "version": "1.0.0",
+  "nodes": [
+    {
+      "id": "classify",
+      "op": "decision",
+      "label": "Classify Ticket",
+      "dependsOn": [],
+      "inputs": ["ticket"],
+      "outputs": ["category"],
+      "timeoutMs": 6000,
+      "provider": { "adapter": "demo" },
+      "deterministic": true,
+      "sideEffectSafe": true,
+      "idempotent": true,
+      "retry": { "maxAttempts": 1, "backoffMs": 0 },
+      "config": {}
+    },
+    {
+      "id": "lookup_account",
+      "op": "retrieval",
+      "label": "Lookup Account",
+      "dependsOn": ["classify"],
+      "inputs": ["category"],
+      "outputs": ["account"],
+      "timeoutMs": 8000,
+      "provider": { "adapter": "demo" },
+      "deterministic": true,
+      "sideEffectSafe": true,
+      "idempotent": true,
+      "retry": { "maxAttempts": 2, "backoffMs": 50 },
+      "config": { "sourceId": "ACCOUNTS" }
+    },
+    {
+      "id": "lookup_kb",
+      "op": "retrieval",
+      "label": "Lookup Knowledge Base",
+      "dependsOn": ["classify"],
+      "inputs": ["category"],
+      "outputs": ["articles"],
+      "timeoutMs": 8000,
+      "provider": { "adapter": "demo" },
+      "deterministic": true,
+      "sideEffectSafe": true,
+      "idempotent": true,
+      "retry": { "maxAttempts": 2, "backoffMs": 50 },
+      "config": { "sourceId": "KB" }
+    },
+    {
+      "id": "draft_reply",
+      "op": "llm",
+      "label": "Draft Reply",
+      "dependsOn": ["lookup_account", "lookup_kb"],
+      "inputs": ["account", "articles"],
+      "outputs": ["reply"],
+      "timeoutMs": 15000,
+      "provider": { "adapter": "demo", "model": "synapse-sim-mini" },
+      "deterministic": true,
+      "sideEffectSafe": true,
+      "idempotent": true,
+      "retry": { "maxAttempts": 1, "backoffMs": 0 },
+      "config": { "section": "answer", "sourceId": "KB" }
+    }
+  ]
+}
