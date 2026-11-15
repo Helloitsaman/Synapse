@@ -6,9 +6,9 @@
  * metadata only. An adapter turns a node + its resolved inputs into an output
  * plus usage figures, and declares its own capabilities and limitations.
  */
-import type { Usage, WorkflowNode } from "../types.js";
+import type { Provenance, SourceRecord, Usage, WorkflowNode } from "../types.js";
 
-export const ADAPTER_CONTRACT_VERSION = "1.0.0";
+export const ADAPTER_CONTRACT_VERSION = "1.1.0";
 
 export interface AdapterCapabilities {
   /** Which op types this adapter can execute. */
@@ -36,6 +36,17 @@ export interface AdapterContext {
 export interface AdapterResult {
   output: unknown;
   usage: Usage;
+  /** Where this output came from. Defaults to "demo" when omitted. */
+  provenance?: Provenance;
+  /** Structured, citable sources this node produced or carried forward. */
+  sources?: SourceRecord[];
+  /** Provider/model provenance for real adapters (never secrets). */
+  meta?: {
+    model?: string;
+    requestId?: string;
+    finishReason?: string;
+    provider?: string;
+  };
 }
 
 export interface Adapter {

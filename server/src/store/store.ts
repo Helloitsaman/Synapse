@@ -44,8 +44,12 @@ export class Store {
     ensureDir();
     const persistedWf = readJson<Workflow[]>(WORKFLOWS_FILE, []);
     const seed = new Map<string, Workflow>();
-    for (const wf of SAMPLE_WORKFLOWS) seed.set(wf.id, wf);
+    // Load user-imported workflows first, then let the built-in samples take
+    // authority over their own ids (so the code definition — including the
+    // env-configured live workflow — is always current and can't be shadowed by
+    // a stale persisted copy). Built-in ids are protected from deletion anyway.
     for (const wf of persistedWf) seed.set(wf.id, wf);
+    for (const wf of SAMPLE_WORKFLOWS) seed.set(wf.id, wf);
     this.workflows = seed;
     this.persistWorkflows();
 

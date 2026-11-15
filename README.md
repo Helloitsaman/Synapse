@@ -20,7 +20,9 @@ real provider measurement.
 - [Test commands](#test-commands)
 - [Architecture](#architecture)
 - [API reference](#api-reference)
+- [Live research slice (opt-in)](#live-research-slice-opt-in)
 - [Optional: OpenAI-compatible model](#optional-openai-compatible-model)
+- [MCP integrations](#mcp-integrations)
 - [Observability: OTLP / SigNoz](#observability-otlp--signoz)
 - [Importing your own workflow](#importing-your-own-workflow)
 - [Security & privacy](#security--privacy)
@@ -73,13 +75,23 @@ to the browser.
 | `PORT` | `4000` | Backend port |
 | `RATE_LIMIT` | `600` | Max API requests / IP / minute |
 | `SYNAPSE_DATA_DIR` | `server/data` | Where run summaries + workflow defs persist |
-| `OPENAI_API_KEY` | — | Enables the opt-in OpenAI-compatible adapter |
+| `OPENAI_API_KEY` | — | Enables the opt-in OpenAI-compatible model adapter |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Default model for `openai` llm nodes |
+| `ANTHROPIC_API_KEY` | — | Enables the opt-in Anthropic (Claude) model adapter |
+| `ANTHROPIC_MODEL` | `claude-3-5-haiku-latest` | Default model for `anthropic` llm nodes |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | — | Enables the opt-in Google Gemini model adapter |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Default model for `gemini` llm nodes |
+| `SEARCH_PROVIDER` | — | `tavily` \| `brave` \| `serpapi` — enables the live `search` retrieval adapter |
+| `TAVILY_API_KEY` / `BRAVE_API_KEY` / `SERPAPI_API_KEY` | — | Key for the chosen search provider |
+| `SYNAPSE_LIVE_MODEL_ADAPTER` | `anthropic` | Which model adapter the built-in *Research Brief (Live)* uses |
+| `SYNAPSE_LIVE_MODEL` | per-adapter default | Model id the live workflow requests |
 | `TOOL_ALLOWLIST` | — (empty) | Comma-separated hostnames the HTTP tool adapter may reach |
 | `SYNAPSE_OTEL_ENABLED` | `0` | Force-enable OpenTelemetry export |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP/HTTP endpoint (also enables export) |
 | `OTEL_SERVICE_NAME` | `synapse` | Service name in telemetry |
+| `SYNAPSE_API_BASE_URL` | `http://127.0.0.1:4000` | Backend URL used by local stdio MCP process |
+| `SYNAPSE_API_TOKEN` | `API_AUTH_TOKEN` | Optional bearer token for MCP-to-API calls |
 
 ## Test commands
 
@@ -88,12 +100,14 @@ npm test            # backend unit + integration + API tests (vitest)
 npm run typecheck   # strict TypeScript typecheck for server + web
 ```
 
-**Latest result:** `32 passed (32)` across 5 files — compiler validation & cycle
+**Latest result:** `69 passed (69)` across 11 files — compiler validation & cycle
 detection, scheduler dependencies/concurrency/cancellation/retries, optimizer
-preconditions & no-op, correctness validation, and API behaviour (incl. a
-baseline-vs-optimized run + compare smoke check, workflow import/delete, and
-built-in-sample delete protection). See
-[Test commands output](#test-commands) in the delivery summary below.
+preconditions & no-op, correctness/citation validation, API behaviour, MCP tool
+discovery/input validation, **live search adapter** parsing/errors/rate-limit/
+cancellation, **model adapters** (OpenAI/Anthropic/Gemini) usage provenance &
+citation extraction, and an **end-to-end live slice** (search → model → cited
+answer) run against deterministic fake providers. Live tests use fake servers, so
+no paid API credentials are needed to run the suite.
 
 ## Architecture
 
@@ -110,8 +124,13 @@ synapse/
 │   │   │   ├── cost.ts          Cost ESTIMATION (demo price table)
 │   │   │   ├── compare.ts       Labelled baseline/optimized comparison
 │   │   │   └── orchestrator.ts  Service layer wiring it all together
-│   │   ├── adapters/            Provider-neutral contract + demo/openai/http-tool
+│   │   ├── adapters/            Provider-neutral contract + adapters:
+│   │   │   │                    demo, search (tavily/brave/serpapi),
+│   │   │   │                    openai, anthropic, gemini, http-tool
+│   │   │   ├── research.ts      Shared source-grounding/citation helpers
+│   │   │   ├── modelBase.ts     Shared grounded-prompt/usage helpers
 │   │   │   └── hosts.ts         Honest host capability matrix
+│   │   ├── mcp/                  MCP stdio server + shared tool definitions
 │   │   ├── correctness/         Pluggable correctness tests
 │   │   ├── telemetry/           OpenTelemetry (optional) + redacting logger
 │   │   ├── store/               JSON persistence (ephemeral run context)
@@ -193,15 +212,84 @@ failures return `422` with `{ ok:false, errors:[{code,message,nodeId?,path?}] }`
 | `DELETE /runs/:id` | Delete a persisted run |
 | `GET /compare?baseline=&optimized=` | Labelled comparison |
 | `GET /integrations` | Adapter capability matrix + host matrix + telemetry status |
+| `POST /mcp` | Stateless Streamable HTTP MCP endpoint (POST JSON-RPC) |
+
+## Live research slice (opt-in)
+
+SYNAPSE ships two research workflows with the **same graph shape** so you can
+compare demo and live honestly:
+
+- **Research Brief** (`research-brief`) — the deterministic **demo** path. Needs
+  no keys. Every output is labelled `provenance: "demo"` and usage `simulated`.
+- **Research Brief (Live)** (`research-brief-live`) — the **live** path: two
+  independent **real web-search** branches (`search` adapter) feed **real model**
+  summaries + a synthesis (`openai` / `anthropic` / `gemini`), then a
+  deterministic formatting transform. Outputs are labelled `provenance: "live"`
+  and usage `provider-reported`.
+
+Both produce one structured, **cited** document: each claim is grounded in
+retrieved sources carried end-to-end (title, canonical URL, publisher, retrieval
+time, snippet/content, stable source id), citations are inline `[sourceId]`
+markers, and the correctness suite verifies every cited id resolves to a
+retrieved source and flags any the model invented.
+
+### Make the live slice work
+
+1. Pick a **search** provider and set its key, e.g. `SEARCH_PROVIDER=tavily` +
+   `TAVILY_API_KEY=…` (Brave and SerpAPI are also supported).
+2. Pick a **model** provider and set its key, e.g. `ANTHROPIC_API_KEY=…`, and
+   choose which the live workflow uses via `SYNAPSE_LIVE_MODEL_ADAPTER` /
+   `SYNAPSE_LIVE_MODEL`.
+3. Start the backend. `GET /api/config` → `demoMode: false` and
+   `live.researchReady: true` confirm both are wired.
+4. Run it (UI **Workflow Lab**, the API, or **Claude Code MCP** — see below). A
+   live run calls paid providers; SYNAPSE marks it clearly and only runs on
+   request.
+
+Every number stays labelled: `measured` (wall-clock/counts), `provider-reported`
+(real usage), `estimated` (cost — providers return no dollar charge), `simulated`
+(demo), or `unavailable` (a real provider ran but returned no usage — never
+invented). If a requested live provider is unconfigured, the node **fails
+cleanly** — SYNAPSE never substitutes demo output for a live node.
+
+### Run the live slice from Claude Code (MCP)
+
+```text
+list SYNAPSE workflows
+run the research-brief-live workflow (optimized) with topic "<your topic>"
+get the SYNAPSE run result for <runId>
+```
+
+The run result reports which adapters ran, the retrieved sources, live-vs-demo
+provenance, provider-reported usage, latency + SYNAPSE overhead, the correctness
+checks, and the cited answer. See
+[`docs/LIVE-SLICE.md`](./docs/LIVE-SLICE.md) for a full walkthrough (including a
+no-key smoke test against local fake providers).
 
 ## Optional: OpenAI-compatible model
 
 Set `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL` / `OPENAI_MODEL`) on the
 **server**, then give an `llm` node `"provider": { "adapter": "openai", "model":
 "…" }`. The adapter calls `/chat/completions`, captures **provider-reported**
-usage when returned, and fails cleanly (keeping demo mode usable) if the provider
-is unreachable or unconfigured. Keys are never exposed to the browser. The
+usage when returned (labelling it `unavailable` otherwise), and fails cleanly if
+the provider is unreachable or unconfigured. `anthropic` and `gemini` adapters
+work the same way for their APIs. Keys are never exposed to the browser. The
 deterministic demo comparison always uses the `demo` adapter.
+
+## MCP integrations
+
+SYNAPSE exposes its existing backend to MCP clients. Local clients can spawn a
+stdio server with `npm --prefix server run mcp`; the main backend also exposes a
+stateless Streamable HTTP endpoint at `POST /mcp`. MCP tools list and compile
+workflows, preview optimizations, import a validated workflow, start a run,
+fetch run results, and compare runs. The stdio process talks to the same running
+SYNAPSE API, so start the backend first (`npm run dev:server` or `npm start`).
+
+See [`docs/MCP-INTEGRATIONS.md`](./docs/MCP-INTEGRATIONS.md) for setup examples
+and the compatibility matrix. MCP connects supported **host applications**;
+it does not make every model or consumer chat app installable, reveal hidden
+conversation context, or automatically take over a host's own execution graph.
+SYNAPSE runs a graph when the host or user explicitly supplies/imports it.
 
 ## Observability: OTLP / SigNoz
 
@@ -265,8 +353,18 @@ node examples/import-workflow.mjs  # in another — compiles, imports, runs, com
 - **Persistence is a JSON file store**, suitable for a local prototype (chosen
   over a native DB for zero-build portability on Windows). Not for concurrent
   multi-process use.
-- **OpenAI adapter is non-deterministic** and excluded from the deterministic
-  comparison; it covers `llm` nodes only.
+- **Live model/search adapters are non-deterministic** and excluded from the
+  deterministic demo comparison. Model adapters cover `llm` nodes; the `search`
+  adapter covers `retrieval` nodes.
+- **Live providers are validated by automated integration tests against
+  deterministic fake servers, and by a documented fake-provider MCP smoke run.** A
+  real paid-provider smoke run requires your own keys and is opt-in — the suite
+  never needs them. Citation grounding is checked structurally (every cited id
+  resolves to a retrieved source, no invented ids); the topic-relevance check is a
+  labelled heuristic, not a factual-accuracy judgment.
+- **The delivered answer + cited source metadata are persisted** with the run (it
+  is the product of the run); intermediate prompts and node I/O bodies remain
+  ephemeral and are not persisted.
 - **SigNoz is optional** and not bundled; the repo ships a lightweight OTLP
   collector for verification and instructions to connect a full SigNoz.
 - The install step may warn that some dependencies' install scripts (e.g.

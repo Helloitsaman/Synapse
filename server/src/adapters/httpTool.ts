@@ -215,6 +215,7 @@ export class HttpToolAdapter implements Adapter {
     return {
       output: { type: "tool-response", status: res.status, body },
       usage: emptyUsage("none"),
+      provenance: "live",
     };
   }
 

@@ -3,6 +3,9 @@ import type { Adapter } from "./contract.js";
 import type { WorkflowNode } from "../types.js";
 import { DemoAdapter } from "./demo.js";
 import { OpenAIAdapter } from "./openai.js";
+import { AnthropicAdapter } from "./anthropic.js";
+import { GeminiAdapter } from "./gemini.js";
+import { SearchAdapter } from "./search.js";
 import { HttpToolAdapter } from "./httpTool.js";
 
 export class AdapterRegistry {
@@ -12,6 +15,9 @@ export class AdapterRegistry {
     this.adapters = adapters ?? [
       new DemoAdapter(),
       new OpenAIAdapter(),
+      new AnthropicAdapter(),
+      new GeminiAdapter(),
+      new SearchAdapter(),
       new HttpToolAdapter(),
     ];
   }

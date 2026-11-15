@@ -74,7 +74,16 @@ export function RunDetails() {
           <div className="stack" style={{ gap: 16 }}>
             <Panel
               title={`RUN ${run.id}`}
-              right={<Badge tone={statusDot(run.status).split(" ")[0]} pulse={run.status === "running"}>{run.status}</Badge>}
+              right={
+                <div className="row" style={{ gap: 8 }}>
+                  {run.execution && (
+                    <Badge tone={run.execution.liveExecution ? "ok" : "violet"}>
+                      {run.execution.liveExecution ? "LIVE" : "DEMO"}
+                    </Badge>
+                  )}
+                  <Badge tone={statusDot(run.status).split(" ")[0]} pulse={run.status === "running"}>{run.status}</Badge>
+                </div>
+              }
             >
               <div className="spread" style={{ flexWrap: "wrap", gap: 16 }}>
                 <KV k="workflow" v={`${run.workflowId} @ ${run.workflowVersion}`} />
@@ -87,19 +96,76 @@ export function RunDetails() {
                 <KV k="tokens" v={int(run.usage.inputTokens + run.usage.outputTokens)} label={run.usage.source} />
                 <KV k="est.cost" v={usd(run.estimatedCostUsd)} label="estimated" />
               </div>
+              {run.execution && (
+                <div className="spread" style={{ flexWrap: "wrap", gap: 16, marginTop: 10 }}>
+                  <KV k="adapters" v={run.execution.adapters.join(", ") || "—"} />
+                  {run.execution.providers.length > 0 && <KV k="providers" v={run.execution.providers.join(", ")} />}
+                  <KV k="sources" v={int(run.execution.sourceCount)} />
+                  <KV k="live/demo nodes" v={`${run.execution.liveNodeCount}/${run.execution.demoNodeCount}`} />
+                </div>
+              )}
               {run.error && <div style={{ marginTop: 12 }}><ErrorBlock message={run.error} /></div>}
               {run.validation && (
-                <div style={{ marginTop: 12 }} className="row">
-                  <span className="section-label" style={{ margin: 0 }}>Correctness</span>
-                  <Badge tone={run.validation.passed ? "ok" : "danger"}>
-                    {run.validation.passed ? "all required passed" : "required check failed"}
-                  </Badge>
-                  <span className="mono faint" style={{ fontSize: 11 }}>
-                    {run.validation.checks.filter((c) => c.passed).length}/{run.validation.checks.length} checks
-                  </span>
+                <div style={{ marginTop: 12 }}>
+                  <div className="row">
+                    <span className="section-label" style={{ margin: 0 }}>Correctness</span>
+                    <Badge tone={run.validation.passed ? "ok" : "danger"}>
+                      {run.validation.passed ? "all required passed" : "required check failed"}
+                    </Badge>
+                    <span className="mono faint" style={{ fontSize: 11 }}>
+                      {run.validation.checks.filter((c) => c.passed).length}/{run.validation.checks.length} checks
+                    </span>
+                  </div>
+                  <div className="stack" style={{ gap: 3, marginTop: 8 }}>
+                    {run.validation.checks.map((c) => (
+                      <div key={c.id} className="row" style={{ gap: 8, fontSize: 11.5 }}>
+                        <span className={`dot ${c.passed ? "ok" : c.required ? "danger" : "amber"}`} />
+                        <span className="mono" style={{ color: "var(--text-1)", width: 190 }}>{c.id}</span>
+                        {c.category && <Label kind={c.category} />}
+                        {!c.required && <span className="faint">optional</span>}
+                        <span className="faint" style={{ flex: 1 }}>{c.detail}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </Panel>
+
+            {run.result && (
+              <Panel
+                title="DELIVERED ANSWER"
+                right={<Label kind={run.result.provenance} />}
+              >
+                {run.result.sources.length > 0 && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div className="section-label" style={{ marginTop: 0 }}>
+                      Sources ({run.result.sources.length}) · cited {run.result.citations.length}
+                    </div>
+                    <div className="stack" style={{ gap: 4 }}>
+                      {run.result.sources.map((s) => {
+                        const cited = run.result!.citations.some((c) => c.sourceId === s.sourceId);
+                        return (
+                          <div key={s.sourceId} className="row" style={{ gap: 8, fontSize: 12, opacity: cited ? 1 : 0.55 }}>
+                            <span className="mono" style={{ color: "var(--accent-cyan, var(--text-0))", width: 34 }}>[{s.sourceId}]</span>
+                            <a href={s.url} target="_blank" rel="noreferrer" style={{ color: "var(--text-1)", textDecoration: "none", flex: 1 }}>
+                              {s.title} <span className="faint">— {s.publisher}</span>
+                            </a>
+                            {cited && <span className="badge"><span className="dot cyan" />cited</span>}
+                            <Label kind={s.provenance} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                <pre
+                  className="mono"
+                  style={{ whiteSpace: "pre-wrap", fontSize: 12, lineHeight: 1.5, color: "var(--text-1)", margin: 0, maxHeight: 420, overflow: "auto" }}
+                >
+                  {run.result.answer}
+                </pre>
+              </Panel>
+            )}
 
             <Panel title="NODE SPANS (TRACE)">
               <div className="stack" style={{ gap: 0 }}>
@@ -121,6 +187,10 @@ export function RunDetails() {
                         <div className="trace-body">
                           <KV k="id" v={s.nodeId} />
                           <KV k="adapter" v={s.adapter} />
+                          {s.provenance && <KV k="provenance" v={s.provenance} />}
+                          {s.model && <KV k="model" v={s.model} />}
+                          {typeof s.sourceCount === "number" && s.sourceCount > 0 && <KV k="sources" v={String(s.sourceCount)} />}
+                          {s.finishReason && <KV k="finish" v={s.finishReason} />}
                           <KV k="status" v={s.status} />
                           <KV k="attempts" v={String(s.attempts)} />
                           <KV k="queue" v={ms(s.queueMs)} label="measured" />

@@ -29,6 +29,9 @@ api.get("/health", (_req, res) => {
 });
 
 api.get("/config", (_req, res) => {
+  const avail = (id: string) => defaultRegistry.get(id)?.isAvailable().available ?? false;
+  const liveModelAdapters = ["openai", "anthropic", "gemini"].filter(avail);
+  const searchAvailable = avail("search");
   res.json({
     schemaVersion: SCHEMA_VERSION,
     adapterContractVersion: ADAPTER_CONTRACT_VERSION,
@@ -37,9 +40,18 @@ api.get("/config", (_req, res) => {
       redactBodies: true,
       telemetryMetadataOnly: true,
       runContextEphemeral: true,
-      retention: "Run summaries persist locally until deleted; node I/O bodies are not persisted.",
+      resultPersisted: true,
+      retention:
+        "Run summaries + the delivered answer (with cited source metadata) persist locally until deleted; intermediate prompts and node I/O bodies are not persisted.",
     },
-    demoMode: !defaultRegistry.get("openai")?.isAvailable().available,
+    // Demo mode = no live provider at all. A live research run also needs search.
+    demoMode: liveModelAdapters.length === 0 && !searchAvailable,
+    live: {
+      modelAdapters: liveModelAdapters,
+      searchAvailable,
+      /** A live research workflow needs BOTH a search provider and a model. */
+      researchReady: searchAvailable && liveModelAdapters.length > 0,
+    },
   });
 });
 
@@ -211,10 +223,18 @@ api.get("/compare", (req, res) => {
 
 // --- integrations / capability matrix (no secrets) ---
 api.get("/integrations", (_req, res) => {
+  const avail = (id: string) => defaultRegistry.get(id)?.isAvailable().available ?? false;
+  const liveModelAdapters = ["openai", "anthropic", "gemini"].filter(avail);
+  const searchAvailable = avail("search");
   res.json({
     adapterContractVersion: ADAPTER_CONTRACT_VERSION,
     adapters: defaultRegistry.matrix(),
     hosts: HOST_MATRIX,
     telemetry: otelConfig(),
+    live: {
+      modelAdapters: liveModelAdapters,
+      searchAvailable,
+      researchReady: searchAvailable && liveModelAdapters.length > 0,
+    },
   });
 });

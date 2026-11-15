@@ -7,6 +7,7 @@ import { compileWorkflow } from "../compiler/compile.js";
 import { buildOptimizationPlan } from "../optimizer/optimizer.js";
 import { executeRun } from "./scheduler.js";
 import { runCorrectness } from "../correctness/checks.js";
+import { extractResult } from "./result.js";
 import { compareRuns } from "./compare.js";
 import { instrumentRun } from "../telemetry/instrument.js";
 import { log } from "../telemetry/logger.js";
@@ -112,6 +113,7 @@ export function startRun(input: StartRunInput): RunRecord {
       execMs: 0,
       usage: { calls: 0, inputTokens: 0, outputTokens: 0, source: "none" },
       memoized: false,
+      sourceCount: 0,
     })),
     usage: { calls: 0, inputTokens: 0, outputTokens: 0, source: "simulated" },
     estimatedCostUsd: 0,
@@ -132,6 +134,11 @@ export function startRun(input: StartRunInput): RunRecord {
         cancelSignal: abort.signal,
         onEvent: (r) => store.setLiveRun(r),
       });
+
+      // Extract the delivered answer (persisted) before bodies are discarded.
+      if (record.status === "succeeded") {
+        record.result = extractResult(ir, outputs);
+      }
 
       // Correctness checks on ephemeral outputs (bodies are then discarded).
       if (record.status === "succeeded") {

@@ -14,8 +14,10 @@ import type {
   IR,
   NodeSpan,
   NodeStatus,
+  Provenance,
   RunMode,
   RunRecord,
+  SourceRecord,
   Usage,
   Workflow,
 } from "../types.js";
@@ -49,7 +51,14 @@ export async function executeRun(
 ): Promise<RunOutcome> {
   const byId = new Map(wf.nodes.map((n) => [n.id, n]));
   const outputs = new Map<string, unknown>();
-  const memoCache = new Map<string, { output: unknown; usage: Usage }>();
+  type MemoEntry = {
+    output: unknown;
+    usage: Usage;
+    provenance?: Provenance;
+    sources?: SourceRecord[];
+    meta?: { model?: string; requestId?: string; finishReason?: string; provider?: string };
+  };
+  const memoCache = new Map<string, MemoEntry>();
 
   const spans = new Map<string, NodeSpan>();
   for (const n of wf.nodes) {
@@ -65,6 +74,7 @@ export async function executeRun(
       execMs: 0,
       usage: { calls: 0, inputTokens: 0, outputTokens: 0, source: "none" },
       memoized: false,
+      sourceCount: 0,
     });
   }
 
@@ -194,7 +204,10 @@ export async function executeRun(
         span.status = "memoized";
         span.endedAt = Date.now();
         span.execMs = 0;
-        span.usage = { calls: 0, inputTokens: 0, outputTokens: 0, source: "simulated" };
+        span.usage = { calls: 0, inputTokens: 0, outputTokens: 0, source: "none" };
+        span.provenance = "cached";
+        span.sourceCount = hit.sources?.length ?? 0;
+        span.model = hit.meta?.model;
         return;
       }
 
@@ -214,8 +227,20 @@ export async function executeRun(
       }
       outputs.set(id, result.output);
       span.usage = result.usage!;
+      span.provenance = result.provenance ?? "demo";
+      span.sourceCount = result.sources?.length ?? 0;
+      span.model = result.meta?.model ?? result.usage?.model;
+      span.requestId = result.meta?.requestId;
+      span.finishReason = result.meta?.finishReason;
       span.status = "succeeded";
-      if (memoKey) memoCache.set(memoKey, { output: result.output, usage: result.usage! });
+      if (memoKey)
+        memoCache.set(memoKey, {
+          output: result.output,
+          usage: result.usage!,
+          provenance: result.provenance,
+          sources: result.sources,
+          meta: result.meta,
+        });
     };
 
     pump();
@@ -234,6 +259,7 @@ export async function executeRun(
   // Aggregate usage from non-memoized spans only (memoized incurs no new cost).
   record.usage = aggregateUsage(record.spans);
   record.estimatedCostUsd = estimateCostUsd(record.usage);
+  record.execution = summarizeExecution(record.spans, outputs);
 
   if (cancelled) record.status = "cancelled";
   else if (failed) {
@@ -257,6 +283,9 @@ function resolveInputs(
 interface AttemptResult {
   output?: unknown;
   usage?: Usage;
+  provenance?: Provenance;
+  sources?: SourceRecord[];
+  meta?: { model?: string; requestId?: string; finishReason?: string; provider?: string };
   error?: string;
   attempts: number;
   cancelled?: boolean;
@@ -289,7 +318,14 @@ async function runWithRetries(
       });
       clearTimeout(timer);
       abortAll.signal.removeEventListener("abort", onGlobalAbort);
-      return { output: res.output, usage: res.usage, attempts: attempt };
+      return {
+        output: res.output,
+        usage: res.usage,
+        provenance: res.provenance,
+        sources: res.sources,
+        meta: res.meta,
+        attempts: attempt,
+      };
     } catch (err) {
       clearTimeout(timer);
       abortAll.signal.removeEventListener("abort", onGlobalAbort);
@@ -341,9 +377,9 @@ function aggregateUsage(spans: NodeSpan[]): Usage {
   let calls = 0;
   let inputTokens = 0;
   let outputTokens = 0;
-  let source: Usage["source"] = "simulated";
   let sawProvider = false;
   let sawSim = false;
+  let sawUnavailable = false;
   for (const s of spans) {
     if (s.memoized) continue;
     calls += s.usage.calls;
@@ -351,9 +387,49 @@ function aggregateUsage(spans: NodeSpan[]): Usage {
     outputTokens += s.usage.outputTokens;
     if (s.usage.source === "provider-reported") sawProvider = true;
     if (s.usage.source === "simulated") sawSim = true;
+    if (s.usage.source === "unavailable") sawUnavailable = true;
   }
-  if (sawProvider && !sawSim) source = "provider-reported";
-  else if (sawProvider && sawSim) source = "simulated"; // mixed -> conservative
-  else source = "simulated";
+  // Precedence: a real provider's reported tokens dominate; otherwise simulated;
+  // otherwise, if a real provider ran but reported nothing, say so honestly.
+  let source: Usage["source"];
+  if (sawProvider) source = "provider-reported";
+  else if (sawSim) source = "simulated";
+  else if (sawUnavailable) source = "unavailable";
+  else source = "none";
   return { calls, inputTokens, outputTokens, source };
+}
+
+/** Build the run-level execution provenance summary from finished spans. */
+export function summarizeExecution(spans: NodeSpan[], outputs: Map<string, unknown>): {
+  adapters: string[];
+  providers: string[];
+  liveNodeCount: number;
+  demoNodeCount: number;
+  liveExecution: boolean;
+  sourceCount: number;
+} {
+  const adapters = new Set<string>();
+  const providers = new Set<string>();
+  let liveNodeCount = 0;
+  let demoNodeCount = 0;
+  for (const s of spans) {
+    if (s.status !== "succeeded" && s.status !== "memoized") continue;
+    adapters.add(s.adapter);
+    if (s.provenance === "live") liveNodeCount++;
+    if (s.provenance === "demo") demoNodeCount++;
+    if (s.provenance === "live" && s.model) providers.add(`${s.adapter}:${s.model}`);
+  }
+  const sourceIds = new Set<string>();
+  for (const out of outputs.values()) {
+    const srcs = (out as any)?.sources;
+    if (Array.isArray(srcs)) for (const src of srcs) if (src?.sourceId) sourceIds.add(src.sourceId);
+  }
+  return {
+    adapters: [...adapters].sort(),
+    providers: [...providers].sort(),
+    liveNodeCount,
+    demoNodeCount,
+    liveExecution: liveNodeCount > 0,
+    sourceCount: sourceIds.size,
+  };
 }

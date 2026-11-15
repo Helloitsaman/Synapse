@@ -21,6 +21,33 @@ export function IntegrationsView({ config }: { config: AppConfig | null }) {
         <p className="h-sub">Adapter capabilities, provider status, telemetry, and privacy — contract v{data.adapterContractVersion}.</p>
       </div>
 
+      <Panel title="LIVE RESEARCH READINESS" style={{ marginBottom: 16 }}>
+        <div className="spread" style={{ flexWrap: "wrap", gap: 14 }}>
+          <div className="row" style={{ gap: 8 }}>
+            <span className="mono muted">mode</span>
+            <Badge tone={data.live?.researchReady ? "ok" : "violet"}>
+              {data.live?.researchReady ? "LIVE ready" : "DEMO only"}
+            </Badge>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <span className="mono muted">search</span>
+            <Badge tone={data.live?.searchAvailable ? "ok" : "idle"}>
+              {data.live?.searchAvailable ? "configured" : "not configured"}
+            </Badge>
+          </div>
+          <div className="row" style={{ gap: 8 }}>
+            <span className="mono muted">model providers</span>
+            <span className="mono faint" style={{ fontSize: 12 }}>
+              {data.live?.modelAdapters.length ? data.live.modelAdapters.join(", ") : "none configured"}
+            </span>
+          </div>
+        </div>
+        <p className="mono faint" style={{ fontSize: 10.5, marginBottom: 0 }}>
+          A live research run (research-brief-live) needs BOTH a search provider and a model provider. SYNAPSE
+          never falls back from a requested live provider to demo output. See docs/LIVE-SLICE.md.
+        </p>
+      </Panel>
+
       <Panel title="ADAPTER CAPABILITY MATRIX" style={{ marginBottom: 16 }}>
         <table className="matrix">
           <thead>

@@ -34,21 +34,39 @@ export interface IR {
 export interface CompileError { code: string; message: string; nodeId?: string; path?: string; }
 export interface CompileResult { ok: boolean; errors: CompileError[]; ir?: IR; }
 
+export type Provenance = "live" | "demo" | "cached" | "mocked" | "unavailable";
+
 export interface Usage {
   calls: number; inputTokens: number; outputTokens: number;
-  source: "simulated" | "provider-reported" | "none"; model?: string;
+  source: "simulated" | "provider-reported" | "unavailable" | "none"; model?: string;
 }
 
 export interface NodeSpan {
   nodeId: string; label: string; op: OpType; adapter: string; status: NodeStatus;
   dependsOn: string[]; attempts: number; queuedAt?: number; startedAt?: number; endedAt?: number;
   queueMs: number; execMs: number; error?: string; usage: Usage; memoized: boolean;
+  provenance?: Provenance; model?: string; requestId?: string; finishReason?: string; sourceCount?: number;
 }
 
 export interface CheckResult {
   id: string; description: string; required: boolean; passed: boolean; detail: string;
+  category?: "structural" | "semantic" | "estimate";
 }
 export interface ValidationResult { passed: boolean; checks: CheckResult[]; }
+
+export interface SourceRecord {
+  sourceId: string; title: string; url: string; publisher: string;
+  snippet: string; content?: string; retrievedAt: string; score?: number; provenance: Provenance;
+}
+export interface Citation { sourceId: string; title: string; url: string; publisher: string; }
+export interface RunResult {
+  answer: string; title?: string; document: unknown;
+  citations: Citation[]; sources: SourceRecord[]; provenance: Provenance;
+}
+export interface ExecutionSummary {
+  adapters: string[]; providers: string[];
+  liveNodeCount: number; demoNodeCount: number; liveExecution: boolean; sourceCount: number;
+}
 
 export interface RunRecord {
   id: string; workflowId: string; workflowVersion: string; irVersion: string;
@@ -56,6 +74,7 @@ export interface RunRecord {
   startedAt?: number; endedAt?: number; totalMs: number; overheadMs: number;
   spans: NodeSpan[]; usage: Usage; estimatedCostUsd: number;
   appliedTransformations: string[]; validation?: ValidationResult; error?: string;
+  execution?: ExecutionSummary; result?: RunResult;
 }
 
 export interface RunSummary {
@@ -78,7 +97,7 @@ export interface OptimizationPlan {
 
 export interface LabeledValue {
   value: number; unit: string;
-  label: "measured" | "estimated" | "simulated" | "provider-reported";
+  label: "measured" | "estimated" | "simulated" | "provider-reported" | "unavailable";
 }
 
 export interface RunComparison {
@@ -98,6 +117,7 @@ export interface Integrations {
   }>;
   hosts: Array<{ host: string; role: string; integration: string; notes: string }>;
   telemetry: { enabled: boolean; endpoint: string | null; serviceName: string; started: boolean };
+  live?: { modelAdapters: string[]; searchAvailable: boolean; researchReady: boolean };
 }
 
 export interface AppConfig {
@@ -105,4 +125,5 @@ export interface AppConfig {
   telemetry: { enabled: boolean; endpoint: string | null; serviceName: string; started: boolean };
   privacy: { redactBodies: boolean; telemetryMetadataOnly: boolean; runContextEphemeral: boolean; retention: string };
   demoMode: boolean;
+  live?: { modelAdapters: string[]; searchAvailable: boolean; researchReady: boolean };
 }

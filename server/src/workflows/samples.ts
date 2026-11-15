@@ -30,7 +30,7 @@ export const researchBrief: Workflow = {
       sideEffectSafe: true,
       idempotent: true,
       retry: { maxAttempts: 2, backoffMs: 50 },
-      config: { sourceId: "SRC-A", corpus: "market" },
+      config: { sourceId: "A", corpus: "market", maxResults: 3 },
     },
     {
       id: "summarize_a",
@@ -60,7 +60,7 @@ export const researchBrief: Workflow = {
       sideEffectSafe: true,
       idempotent: true,
       retry: { maxAttempts: 2, backoffMs: 50 },
-      config: { sourceId: "SRC-B", corpus: "filings" },
+      config: { sourceId: "B", corpus: "filings", maxResults: 3 },
     },
     {
       id: "summarize_b",
@@ -214,8 +214,141 @@ export const notifyAndReport: Workflow = {
   ],
 };
 
+/**
+ * The LIVE research workflow: same graph shape as Research Brief, but the two
+ * retrieval branches call a real search provider (`search` adapter) and the
+ * summary/synthesis nodes call a real model provider. The final formatting is
+ * deterministic (demo adapter) so it stays free and reproducible.
+ *
+ * The model adapter/model is chosen from env at load time so a user can point it
+ * at whichever provider they have a key for, without editing JSON:
+ *   SYNAPSE_LIVE_MODEL_ADAPTER = anthropic | openai | gemini  (default anthropic)
+ *   SYNAPSE_LIVE_MODEL         = a model id that adapter supports
+ * Running it requires both SEARCH_PROVIDER + a search key AND the model key;
+ * otherwise the run fails cleanly (SYNAPSE never falls back to demo silently).
+ */
+const DEFAULT_LIVE_MODELS: Record<string, string> = {
+  anthropic: "claude-3-5-haiku-latest",
+  openai: "gpt-4o-mini",
+  gemini: "gemini-2.0-flash",
+};
+
+export function makeResearchBriefLive(opts?: {
+  modelAdapter?: string;
+  model?: string;
+}): Workflow {
+  const modelAdapter = opts?.modelAdapter ?? process.env.SYNAPSE_LIVE_MODEL_ADAPTER ?? "anthropic";
+  const model =
+    opts?.model ?? process.env.SYNAPSE_LIVE_MODEL ?? DEFAULT_LIVE_MODELS[modelAdapter] ?? "gpt-4o-mini";
+  const modelProvider = { adapter: modelAdapter, model };
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    id: "research-brief-live",
+    name: "Research Brief (Live)",
+    description:
+      "LIVE: two real web-search branches feed real model summaries and a synthesis, " +
+      "with source citations. Requires a configured search provider and model key.",
+    version: "1.0.0",
+    nodes: [
+      {
+        id: "retrieve_a",
+        op: "retrieval",
+        label: "Search — Overview & Key Facts",
+        dependsOn: [],
+        inputs: ["topic"],
+        outputs: ["docs_a"],
+        timeoutMs: 20000,
+        provider: { adapter: "search" },
+        deterministic: false,
+        sideEffectSafe: true,
+        idempotent: true,
+        retry: { maxAttempts: 2, backoffMs: 400 },
+        config: { sourceId: "A", angle: "overview and key facts", maxResults: 4 },
+      },
+      {
+        id: "summarize_a",
+        op: "llm",
+        label: "Summarize — Overview Sources",
+        dependsOn: ["retrieve_a"],
+        inputs: ["docs_a"],
+        outputs: ["summary_a"],
+        timeoutMs: 40000,
+        provider: modelProvider,
+        deterministic: false,
+        sideEffectSafe: true,
+        idempotent: true,
+        retry: { maxAttempts: 2, backoffMs: 500 },
+        config: { section: "A" },
+      },
+      {
+        id: "retrieve_b",
+        op: "retrieval",
+        label: "Search — Recent News & Analysis",
+        dependsOn: [],
+        inputs: ["topic"],
+        outputs: ["docs_b"],
+        timeoutMs: 20000,
+        provider: { adapter: "search" },
+        deterministic: false,
+        sideEffectSafe: true,
+        idempotent: true,
+        retry: { maxAttempts: 2, backoffMs: 400 },
+        config: { sourceId: "B", angle: "recent news and analysis", maxResults: 4 },
+      },
+      {
+        id: "summarize_b",
+        op: "llm",
+        label: "Summarize — News Sources",
+        dependsOn: ["retrieve_b"],
+        inputs: ["docs_b"],
+        outputs: ["summary_b"],
+        timeoutMs: 40000,
+        provider: modelProvider,
+        deterministic: false,
+        sideEffectSafe: true,
+        idempotent: true,
+        retry: { maxAttempts: 2, backoffMs: 500 },
+        config: { section: "B" },
+      },
+      {
+        id: "synthesize",
+        op: "llm",
+        label: "Synthesize Brief (cited)",
+        dependsOn: ["summarize_a", "summarize_b"],
+        inputs: ["summary_a", "summary_b"],
+        outputs: ["brief"],
+        timeoutMs: 45000,
+        provider: modelProvider,
+        deterministic: false,
+        sideEffectSafe: true,
+        idempotent: true,
+        retry: { maxAttempts: 2, backoffMs: 500 },
+        config: { section: "synthesis" },
+      },
+      {
+        id: "format_brief",
+        op: "transform",
+        label: "Format & Validate Output",
+        dependsOn: ["synthesize"],
+        inputs: ["brief"],
+        outputs: ["document"],
+        timeoutMs: 5000,
+        provider: { adapter: "demo" },
+        deterministic: true,
+        sideEffectSafe: true,
+        idempotent: true,
+        retry: { maxAttempts: 1, backoffMs: 0 },
+        config: { format: "brief-v1" },
+      },
+    ],
+  };
+}
+
+export const researchBriefLive: Workflow = makeResearchBriefLive();
+
 export const SAMPLE_WORKFLOWS: Workflow[] = [
   researchBrief,
+  researchBriefLive,
   quickLookup,
   notifyAndReport,
 ];

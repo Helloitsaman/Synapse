@@ -2,14 +2,23 @@
  * OpenAI-compatible model adapter (opt-in).
  *
  * Configured ENTIRELY through server-side environment variables. The API key is
- * never sent to or exposed in the browser. When not configured (or the network
- * is unreachable) it reports itself unavailable and the app stays in demo mode.
+ * never sent to or exposed in the browser. When not configured it reports itself
+ * unavailable; SYNAPSE never silently falls back to demo output for a node that
+ * requested this provider.
  *
- * Captures provider-reported usage when the endpoint returns it.
+ * Captures provider-reported usage when the endpoint returns it, and labels it
+ * "unavailable" (never invented) otherwise.
  */
 import type { Adapter, AdapterContext, AdapterResult } from "./contract.js";
 import { ADAPTER_CONTRACT_VERSION, AdapterError } from "./contract.js";
-import type { Usage, WorkflowNode } from "../types.js";
+import type { WorkflowNode } from "../types.js";
+import {
+  MAX_OUTPUT_TOKENS,
+  assembleOutput,
+  buildPrompt,
+  providerFetch,
+  usageFrom,
+} from "./modelBase.js";
 
 export class OpenAIAdapter implements Adapter {
   readonly id = "openai";
@@ -22,7 +31,7 @@ export class OpenAIAdapter implements Adapter {
     limitations: [
       "Requires OPENAI_API_KEY (+ optional OPENAI_BASE_URL/OPENAI_MODEL).",
       "Only `llm` nodes are supported.",
-      "Non-deterministic: not used for the deterministic demo comparison.",
+      "Non-deterministic: excluded from the deterministic demo comparison.",
     ],
   };
 
@@ -53,60 +62,43 @@ export class OpenAIAdapter implements Adapter {
 
     const { node, inputs, signal, workflowInputs } = ctx;
     const model = node.provider.model ?? this.defaultModel;
-    const prompt = this.buildPrompt(node, inputs, workflowInputs);
+    const { system, user } = buildPrompt(node, inputs, workflowInputs);
 
-    let res: Response;
-    try {
-      res = await fetch(`${this.baseUrl}/chat/completions`, {
+    const data = await providerFetch(
+      `${this.baseUrl}/chat/completions`,
+      {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.apiKey}`,
-        },
+        headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
         body: JSON.stringify({
           model,
-          messages: [{ role: "user", content: prompt }],
-          temperature: 0,
-          max_tokens: 400,
+          messages: [
+            { role: "system", content: system },
+            { role: "user", content: user },
+          ],
+          temperature: 0.2,
+          max_tokens: MAX_OUTPUT_TOKENS,
         }),
         signal,
-      });
-    } catch (err) {
-      throw new AdapterError(
-        `Provider request failed: ${(err as Error).message}`,
-        "PROVIDER_UNREACHABLE",
-      );
-    }
+      },
+      "OpenAI",
+    );
 
-    if (!res.ok) {
-      const body = await res.text().catch(() => "");
-      throw new AdapterError(
-        `Provider returned ${res.status}: ${body.slice(0, 200)}`,
-        "PROVIDER_ERROR",
-      );
-    }
+    const choice = data?.choices?.[0];
+    const text = choice?.message?.content ?? "";
+    const usage = usageFrom(model, data?.usage?.prompt_tokens, data?.usage?.completion_tokens);
+    const { output, sources } = assembleOutput(node, text, inputs, workflowInputs);
 
-    const data = (await res.json()) as any;
-    const text = data?.choices?.[0]?.message?.content ?? "";
-    const usage: Usage = {
-      calls: 1,
-      inputTokens: data?.usage?.prompt_tokens ?? 0,
-      outputTokens: data?.usage?.completion_tokens ?? 0,
-      source: data?.usage ? "provider-reported" : "none",
-      model,
+    return {
+      output,
+      usage,
+      provenance: "live",
+      sources,
+      meta: {
+        provider: "openai",
+        model,
+        requestId: typeof data?.id === "string" ? data.id : undefined,
+        finishReason: choice?.finish_reason,
+      },
     };
-    return { output: { type: "text", text, model }, usage };
-  }
-
-  private buildPrompt(
-    node: WorkflowNode,
-    inputs: Record<string, unknown>,
-    workflowInputs: Record<string, unknown>,
-  ): string {
-    const topic = String(workflowInputs.topic ?? "");
-    const context = Object.entries(inputs)
-      .map(([k, v]) => `- ${k}: ${JSON.stringify(v).slice(0, 500)}`)
-      .join("\n");
-    return `Task: ${node.label}\nTopic: ${topic}\nContext:\n${context}\n\nRespond concisely.`;
   }
 }

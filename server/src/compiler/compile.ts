@@ -11,7 +11,17 @@ import type { Workflow, WorkflowNode } from "../schema.js";
 import type { CompileError, CompileResult, GraphData, IR } from "../types.js";
 import { contentHash } from "../util/hash.js";
 
-const KNOWN_ADAPTERS = new Set(["demo", "openai", "http-tool"]);
+const KNOWN_ADAPTERS = new Set([
+  "demo",
+  "openai",
+  "anthropic",
+  "gemini",
+  "search",
+  "http-tool",
+]);
+
+/** Live model adapters that execute `llm` nodes against a real provider. */
+const LIVE_MODEL_ADAPTERS = new Set(["openai", "anthropic", "gemini"]);
 
 export function compileWorkflow(raw: unknown): CompileResult {
   const errors: CompileError[] = [];

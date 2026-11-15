@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { api } from "./api/routes.js";
 import { initTelemetry, shutdownTelemetry } from "./telemetry/otel.js";
 import { log } from "./telemetry/logger.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createSynapseMcpServer } from "./mcp/server.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT ?? 4000);
@@ -60,7 +62,7 @@ const sweep = setInterval(() => {
 }, WINDOW_MS);
 sweep.unref?.();
 
-app.use("/api", (req, res, next) => {
+const rateLimit: express.RequestHandler = (req, res, next) => {
   const ip = req.ip ?? "unknown";
   const now = Date.now();
   const arr = (hits.get(ip) ?? []).filter((t) => now - t < WINDOW_MS);
@@ -76,20 +78,53 @@ app.use("/api", (req, res, next) => {
     return res.status(429).json({ error: { code: "RATE_LIMITED", message: "Too many requests." } });
   }
   next();
-});
+};
+app.use(["/api", "/mcp"], rateLimit);
 
 // Authentication gate (no-op when API_AUTH_TOKEN is unset). Health stays open
 // so liveness probes work without credentials.
-app.use("/api", (req, res, next) => {
+const authenticate: express.RequestHandler = (req, res, next) => {
   if (!AUTH_TOKEN || req.path === "/health") return next();
   const header = req.get("authorization") ?? "";
   const bearer = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
   const provided = bearer || (req.get("x-api-key") ?? "").trim();
   if (provided && timingSafeEqualStr(provided, AUTH_TOKEN)) return next();
   return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Missing or invalid API token." } });
-});
+};
+app.use(["/api", "/mcp"], authenticate);
 
 app.use("/api", api);
+
+// Stateless Streamable HTTP endpoint. A fresh transport per POST prevents
+// JSON-RPC request ID collisions between independent MCP clients.
+app.post("/mcp", async (req, res) => {
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+    enableJsonResponse: true,
+  });
+  const mcp = createSynapseMcpServer({
+    apiBaseUrl: process.env.SYNAPSE_API_BASE_URL ?? `http://127.0.0.1:${PORT}`,
+    apiToken: AUTH_TOKEN,
+  });
+  res.on("close", () => {
+    void transport.close();
+    void mcp.close();
+  });
+  try {
+    await mcp.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+  } catch (error) {
+    log("error", "mcp.request_failed", { error: (error as Error).message });
+    if (!res.headersSent) {
+      res.status(500).json({ error: { code: "MCP_ERROR", message: "SYNAPSE MCP request failed." } });
+    }
+  }
+});
+
+app.all("/mcp", (_req, res) => {
+  res.setHeader("Allow", "POST");
+  res.status(405).json({ error: { code: "METHOD_NOT_ALLOWED", message: "Use POST for stateless Streamable HTTP MCP requests." } });
+});
 
 // Serve the built frontend if present (production single-origin mode).
 const webDist = join(__dirname, "../../web/dist");
