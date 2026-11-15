@@ -153,6 +153,15 @@ export interface NodeSpan {
   sourceCount: number;
 }
 
+/**
+ * Run-level provenance. "live" = every successful node ran against a real
+ * provider; "demo" = every successful node was simulated; "mixed" = a genuine
+ * blend (some live, some demo). A deterministic formatting node that only
+ * re-assembles live data is counted as live (it carries live provenance), so a
+ * fully-live research run is not mislabelled MIXED by its formatter.
+ */
+export type ProvenanceMode = "live" | "demo" | "mixed";
+
 /** Run-level execution provenance summary (no secrets, no bodies). */
 export interface ExecutionSummary {
   /** Distinct adapters that actually ran a node. */
@@ -163,8 +172,48 @@ export interface ExecutionSummary {
   demoNodeCount: number;
   /** True if ANY node ran against a real external provider. */
   liveExecution: boolean;
+  /** True when BOTH live and demo nodes contributed to the result. */
+  mixedExecution: boolean;
+  /** Overall provenance label derived from ALL successful node provenance. */
+  provenanceMode: ProvenanceMode;
   /** Distinct sources retrieved across the run. */
   sourceCount: number;
+}
+
+/** How cost was derived. "unavailable" = unknown, never shown as a $0 charge. */
+export type CostLabel = "estimated" | "unavailable";
+
+/** Provenance/pricing metadata for an estimated cost (never a provider charge). */
+export interface CostEstimate {
+  /** Estimated USD, or null when it cannot be estimated (unknown ≠ free). */
+  usd: number | null;
+  label: CostLabel;
+  /** Which local price table produced this (version + date), for auditability. */
+  pricingSource: string;
+  /** Whether the model had a matching price row (vs. a fallback default rate). */
+  modelMatched: boolean;
+  model?: string;
+}
+
+/**
+ * A privacy-safe, NON-REVERSIBLE fingerprint of the inputs/config that define
+ * whether two runs are comparable. Hashes are one-way (sha256-derived); raw
+ * inputs are never stored here.
+ */
+export interface RunFingerprint {
+  workflowId: string;
+  workflowVersion: string;
+  irVersion: string;
+  /** Hash of normalized workflow inputs (topic, etc.). */
+  inputsHash: string;
+  /** Hash of per-node adapter+model+canonical config. */
+  configHash: string;
+  /** Distinct adapters declared by the workflow. */
+  adapters: string[];
+  /** Distinct provider:model pairs declared for llm nodes. */
+  models: string[];
+  mode: RunMode;
+  concurrency: number;
 }
 
 export interface RunRecord {
@@ -184,14 +233,22 @@ export interface RunRecord {
   overheadMs: number;
   spans: NodeSpan[];
   usage: Usage;
-  /** Estimated cost in USD — CALCULATED, not a provider charge. */
-  estimatedCostUsd: number;
+  /**
+   * Estimated cost in USD — CALCULATED, not a provider charge. `null` means the
+   * cost is UNKNOWN (a real provider ran but reported no usage); it is never
+   * rendered as a $0 charge. See `cost` for provenance/pricing metadata.
+   */
+  estimatedCostUsd: number | null;
+  /** Cost provenance + pricing source (always labelled, never a real charge). */
+  cost: CostEstimate;
   /** Which transformations were applied to produce this run. */
   appliedTransformations: string[];
   validation?: ValidationResult;
   error?: string;
   /** Execution provenance summary (which adapters/providers actually ran). */
   execution?: ExecutionSummary;
+  /** Privacy-safe fingerprint of the inputs/config that define comparability. */
+  fingerprint?: RunFingerprint;
   /**
    * The delivered answer + cited sources. This IS persisted (it is the product
    * of the run). Intermediate prompts and node I/O bodies remain ephemeral.
@@ -243,17 +300,54 @@ export interface OptimizationPlan {
   summary: string;
 }
 
-/** A labelled metric value: is it measured, estimated, or simulated? */
+/** A labelled metric value: is it measured, estimated, simulated, or unknown? */
 export interface LabeledValue {
   value: number;
   unit: string;
-  label: "measured" | "estimated" | "simulated" | "provider-reported";
+  label: "measured" | "estimated" | "simulated" | "provider-reported" | "unavailable" | "none";
+}
+
+/**
+ * Whether two runs are actually comparable, derived from their fingerprints.
+ * A comparison across mismatched inputs/config is apples-to-oranges and is
+ * marked, never silently presented as a clean before/after.
+ */
+export interface ComparabilityReport {
+  comparable: boolean;
+  sameWorkflow: boolean;
+  sameWorkflowVersion: boolean;
+  sameInputs: boolean;
+  sameConfig: boolean;
+  /** Human-readable list of the fingerprint fields that differ. */
+  mismatches: string[];
+  /** True when either run lacks a fingerprint (older run) — comparability unknown. */
+  fingerprintMissing: boolean;
+}
+
+/** Heuristic (ESTIMATE) comparison of the two delivered answers. */
+export interface AnswerComparison {
+  baselineProvenance?: Provenance;
+  optimizedProvenance?: Provenance;
+  baselineCitations: string[];
+  optimizedCitations: string[];
+  /** Lexical Jaccard similarity of the answers (0..1) — an estimate, not truth. */
+  similarity: number;
+  /** True when the SET of cited source ids matches exactly. */
+  sameCitedSources: boolean;
+  label: "estimate";
+  note: string;
 }
 
 export interface RunComparison {
   baseline: RunRecord;
   optimized: RunRecord;
   sampleCount: number;
+  /** Fingerprint-based comparability (matched vs. mismatched runs). */
+  comparability: ComparabilityReport;
+  /** True when both runs' required-check outcomes agree. */
+  validationMatch: boolean;
+  /** Heuristic answer comparison (estimate), when both runs produced answers. */
+  answer?: AnswerComparison;
   metrics: {
     baselineTotalMs: LabeledValue;
     optimizedTotalMs: LabeledValue;
@@ -268,5 +362,51 @@ export interface RunComparison {
     baselineCostUsd: LabeledValue;
     optimizedCostUsd: LabeledValue;
   };
+  note: string;
+}
+
+/** Summary statistics of a repeated measurement (all values measured). */
+export interface Distribution {
+  samples: number;
+  min: number;
+  median: number;
+  p95: number;
+  max: number;
+  mean: number;
+  /** Population standard deviation. */
+  stdev: number;
+  unit: string;
+  label: "measured";
+  /** Raw per-sample values, in collection order. */
+  values: number[];
+}
+
+export interface BenchmarkModeResult {
+  mode: RunMode;
+  runIds: string[];
+  /** Runs that did not reach "succeeded". */
+  failures: number;
+  totalMs: Distribution;
+  overheadMs: Distribution;
+}
+
+/**
+ * A paired, repeated benchmark: N baseline + N optimized runs executed in
+ * alternating/interleaved order against the SAME workflow + inputs, reported as
+ * distributions (never a single sample, never an unqualified significance claim).
+ */
+export interface BenchmarkResult {
+  workflowId: string;
+  workflowVersion: string;
+  repetitions: number;
+  /** The interleaved execution order (for audit). */
+  order: Array<{ mode: RunMode; runId: string; totalMs: number; status: RunStatus }>;
+  baseline: BenchmarkModeResult;
+  optimized: BenchmarkModeResult;
+  /** baseline.median / optimized.median — a ratio of medians, measured. */
+  speedupMedian: number;
+  /** Comparability across the two sets (should be matched by construction). */
+  comparability: ComparabilityReport;
+  baselineKind: "synapse-sequential-graph";
   note: string;
 }

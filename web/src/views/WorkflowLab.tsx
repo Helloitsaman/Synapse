@@ -18,6 +18,7 @@ export function WorkflowLab() {
   const [selected, setSelected] = useState<string | null>(null);
   const [mode, setMode] = useState<"baseline" | "optimized">("optimized");
   const [concurrency, setConcurrency] = useState<number>(2);
+  const [topic, setTopic] = useState<string>("");
   const [run, setRun] = useState<RunRecord | null>(null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -61,7 +62,8 @@ export function WorkflowLab() {
     setRunning(true);
     setRun(null);
     try {
-      const seed = await api.startRun(wfId, mode, mode === "optimized" ? concurrency : undefined);
+      const inputs = topic.trim() ? { topic: topic.trim() } : undefined;
+      const seed = await api.startRun(wfId, mode, mode === "optimized" ? concurrency : undefined, inputs);
       setRun(seed);
       subscribeRun(
         seed.id,
@@ -163,6 +165,22 @@ export function WorkflowLab() {
             {/* Run controls */}
             <Panel title="RUN CONTROL" className="reveal">
               <div className="stack" style={{ gap: 12 }}>
+                <label className="stack" style={{ gap: 4 }}>
+                  <span className="mono muted" style={{ fontSize: 11 }}>task / topic input</span>
+                  <input
+                    className="select"
+                    type="text"
+                    value={topic}
+                    placeholder="e.g. offshore wind capacity in 2026"
+                    onChange={(e) => setTopic(e.target.value)}
+                    style={{ width: "100%" }}
+                  />
+                  <span className="mono faint" style={{ fontSize: 10 }}>
+                    effective input: {topic.trim()
+                      ? `{ "topic": "${topic.trim()}" }`
+                      : `{ "topic": "Q4 sector outlook" } (server default)`}
+                  </span>
+                </label>
                 <div className="toggle full">
                   <button className={mode === "baseline" ? "on" : ""} onClick={() => setMode("baseline")}>Baseline</button>
                   <button className={mode === "optimized" ? "on" : ""} onClick={() => setMode("optimized")}>Optimized</button>

@@ -9,6 +9,7 @@ import {
   compileRaw,
   getComparison,
   preview,
+  runBenchmark,
   startRun,
 } from "../runtime/orchestrator.js";
 import { defaultRegistry } from "../adapters/registry.js";
@@ -16,7 +17,12 @@ import { HOST_MATRIX } from "../adapters/hosts.js";
 import { BUILTIN_WORKFLOW_IDS } from "../workflows/samples.js";
 import { otelConfig } from "../telemetry/otel.js";
 import { ADAPTER_CONTRACT_VERSION } from "../adapters/contract.js";
+import { PRICING_VERSION } from "../runtime/cost.js";
+import { persistSourceContent } from "../runtime/result.js";
 import { SCHEMA_VERSION } from "../schema.js";
+
+/** Hosted multi-user is NOT supported by this prototype — advertised honestly. */
+const MULTI_USER_READY = false;
 
 export const api = Router();
 
@@ -41,9 +47,16 @@ api.get("/config", (_req, res) => {
       telemetryMetadataOnly: true,
       runContextEphemeral: true,
       resultPersisted: true,
+      /** Whether provider-extracted page content is kept in persisted results. */
+      persistSourceContent: persistSourceContent(),
       retention:
-        "Run summaries + the delivered answer (with cited source metadata) persist locally until deleted; intermediate prompts and node I/O bodies are not persisted.",
+        "Run summaries + the delivered answer persist locally until deleted. Persisted " +
+        "sources keep CITATION METADATA only (id, title, url, publisher, time) — the " +
+        "provider-extracted page content is dropped unless SYNAPSE_PERSIST_SOURCE_CONTENT=1. " +
+        "Intermediate prompts and node I/O bodies are never persisted. A retention cap " +
+        "(SYNAPSE_MAX_RUNS, default 200) bounds stored runs.",
     },
+    pricing: { source: PRICING_VERSION, note: "Local estimate table; costs are estimates, never provider charges." },
     // Demo mode = no live provider at all. A live research run also needs search.
     demoMode: liveModelAdapters.length === 0 && !searchAvailable,
     live: {
@@ -51,6 +64,14 @@ api.get("/config", (_req, res) => {
       searchAvailable,
       /** A live research workflow needs BOTH a search provider and a model. */
       researchReady: searchAvailable && liveModelAdapters.length > 0,
+    },
+    deployment: {
+      // Honest: single shared token + local JSON store. Not hosted-multi-user ready.
+      multiUserReady: MULTI_USER_READY,
+      note:
+        "Single-user local prototype: one optional shared API token and a local JSON store. " +
+        "Hosted multi-user (per-user OAuth/identity, tenant isolation, encrypted credential " +
+        "vault, transactional DB, quotas, audit) is NOT implemented. Keep to local use.",
     },
   });
 });
@@ -218,6 +239,27 @@ api.get("/compare", (req, res) => {
     res.json(getComparison(baseline, optimized));
   } catch (err) {
     fail(res, 404, "NOT_FOUND", (err as Error).message);
+  }
+});
+
+// --- paired, repeated benchmark (matched config, distributions) ---
+api.post("/benchmark", async (req, res) => {
+  const { workflowId, repetitions, concurrency, workflowInputs } = req.body ?? {};
+  if (!workflowId) return fail(res, 400, "BAD_REQUEST", "workflowId is required.");
+  const reps = Number(repetitions ?? 3);
+  if (!Number.isFinite(reps) || reps < 1 || reps > 10) {
+    return fail(res, 400, "BAD_REQUEST", "repetitions must be between 1 and 10.");
+  }
+  if (concurrency !== undefined && (typeof concurrency !== "number" || concurrency < 1 || concurrency > 16)) {
+    return fail(res, 400, "BAD_REQUEST", "concurrency must be between 1 and 16.");
+  }
+  try {
+    const result = await runBenchmark({ workflowId, repetitions: reps, concurrency, workflowInputs });
+    res.json(result);
+  } catch (err) {
+    if (err instanceof WorkflowNotFound) return fail(res, 404, "NOT_FOUND", err.message);
+    if (err instanceof CompileFailed) return fail(res, 422, "COMPILE_FAILED", err.message);
+    fail(res, 500, "BENCHMARK_ERROR", (err as Error).message);
   }
 });
 

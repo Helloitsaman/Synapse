@@ -1,7 +1,9 @@
 import type { NodeStatus, OpType, RunStatus } from "./types";
 
 export const ms = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(2)}s` : `${Math.round(n)}ms`);
-export const usd = (n: number) => `$${n.toFixed(n < 0.01 ? 6 : 4)}`;
+/** Null/undefined cost means UNKNOWN (never shown as a $0 charge). */
+export const usd = (n: number | null | undefined) =>
+  n == null ? "unknown" : `$${n.toFixed(n < 0.01 ? 6 : 4)}`;
 export const int = (n: number) => n.toLocaleString();
 
 export function relTime(iso: string): string {

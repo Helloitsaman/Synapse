@@ -1,3 +1,6 @@
+// Load server/.env (if present) before any module reads env at import time.
+// Shell-exported variables always take precedence; see src/env.ts.
+import "./env.js";
 import express from "express";
 import cors from "cors";
 import { existsSync } from "node:fs";
@@ -161,6 +164,12 @@ async function main() {
       log("warn", "server.insecure", {
         message:
           "Bound to a non-loopback address without API_AUTH_TOKEN. Anyone who can reach this port can run workflows and read/delete runs.",
+      });
+    }
+    if (exposed) {
+      log("warn", "server.not_multiuser", {
+        message:
+          "This is a single-user prototype: one shared token and a local JSON store, with NO per-user identity, tenant isolation, or encrypted credential vault. Do not use it for hosted multi-user access.",
       });
     }
     // eslint-disable-next-line no-console

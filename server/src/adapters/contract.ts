@@ -59,14 +59,49 @@ export interface Adapter {
   execute(ctx: AdapterContext): Promise<AdapterResult>;
 }
 
+/**
+ * Error codes that represent TRANSIENT failures — safe to retry (for an
+ * idempotent node) because the request likely did not durably complete and a
+ * retry has a real chance of succeeding.
+ */
+export const RETRYABLE_CODES = new Set([
+  "RATE_LIMITED",
+  "PROVIDER_UNREACHABLE",
+  "TIMEOUT",
+  "PROVIDER_OVERLOADED",
+]);
+
 /** Thrown by adapters to signal a clean, user-facing execution failure. */
 export class AdapterError extends Error {
+  /** Optional upstream HTTP status (lets the scheduler classify 5xx/4xx). */
+  readonly status?: number;
+  /** Server-requested wait before retrying (from a Retry-After header), ms. */
+  readonly retryAfterMs?: number;
+
   constructor(
     message: string,
     readonly code = "ADAPTER_ERROR",
+    opts?: { status?: number; retryAfterMs?: number },
   ) {
     super(message);
     this.name = "AdapterError";
+    this.status = opts?.status;
+    this.retryAfterMs = opts?.retryAfterMs;
+  }
+
+  /**
+   * Is this error safe to retry? Transient codes and 408/429/5xx HTTP statuses
+   * are retryable; a configuration/validation/4xx error is NOT (retrying only
+   * wastes another paid call and repeats the same failure).
+   */
+  get retryable(): boolean {
+    if (RETRYABLE_CODES.has(this.code)) return true;
+    if (typeof this.status === "number") {
+      if (this.status === 408 || this.status === 429) return true;
+      if (this.status >= 500 && this.status <= 599) return true;
+      return false;
+    }
+    return false;
   }
 }
 

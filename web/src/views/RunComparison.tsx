@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
-import type { RunComparison as Cmp, RunRecord, RunSummary } from "../lib/types";
+import type { BenchmarkResult, RunComparison as Cmp, RunRecord, RunSummary } from "../lib/types";
 import { Panel, Badge, Loading, ErrorBlock, Empty, Label } from "../components/primitives";
 import { ms, usd, int, OP_META } from "../lib/format";
 
@@ -69,18 +69,120 @@ export function RunComparison() {
       ) : (
         <ComparisonBody cmp={cmp} />
       )}
+
+      <div style={{ marginTop: 16 }}>
+        <BenchmarkPanel runs={runs} />
+      </div>
     </div>
+  );
+}
+
+function BenchmarkPanel({ runs }: { runs: RunSummary[] }) {
+  const workflowIds = useMemo(() => [...new Set(runs.map((r) => r.workflowId))], [runs]);
+  const [wfId, setWfId] = useState<string>("");
+  const [reps, setReps] = useState<number>(3);
+  const [topic, setTopic] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [bench, setBench] = useState<BenchmarkResult | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const effWf = wfId || workflowIds[0] || "research-brief";
+
+  async function run() {
+    setBusy(true); setErr(null); setBench(null);
+    try {
+      const inputs = topic.trim() ? { topic: topic.trim() } : undefined;
+      setBench(await api.benchmark(effWf, reps, undefined, inputs));
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Panel title="PAIRED BENCHMARK (REPEATED)" right={<span className="mono faint" style={{ fontSize: 10.5 }}>interleaved · distributions</span>}>
+      <p className="muted" style={{ marginTop: 0, fontSize: 12.5 }}>
+        Runs N baseline + N optimized of the SAME workflow &amp; input, interleaved, and reports median / p95 / spread.
+        Baseline = sequential graph execution, not a host-native chat prompt. A single pair is not a benchmark.
+      </p>
+      <div className="row" style={{ flexWrap: "wrap", gap: 12, alignItems: "flex-end" }}>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="section-label" style={{ margin: 0 }}>Workflow</span>
+          <select className="select" value={effWf} onChange={(e) => setWfId(e.target.value)}>
+            {(workflowIds.length ? workflowIds : ["research-brief"]).map((id) => <option key={id} value={id}>{id}</option>)}
+          </select>
+        </label>
+        <label className="stack" style={{ gap: 4 }}>
+          <span className="section-label" style={{ margin: 0 }}>Reps / mode</span>
+          <input className="select" type="number" min={1} max={10} value={reps}
+            onChange={(e) => setReps(Math.max(1, Math.min(10, +e.target.value)))} style={{ width: 80 }} />
+        </label>
+        <label className="stack" style={{ gap: 4, flex: 1, minWidth: 180 }}>
+          <span className="section-label" style={{ margin: 0 }}>Topic (optional)</span>
+          <input className="select" type="text" value={topic} placeholder="server default" onChange={(e) => setTopic(e.target.value)} />
+        </label>
+        <button className="btn primary" onClick={run} disabled={busy}>{busy ? "● Running…" : "▶ Run benchmark"}</button>
+      </div>
+      {err && <div style={{ marginTop: 12 }}><ErrorBlock message={err} /></div>}
+      {bench && (
+        <div style={{ marginTop: 14 }}>
+          <div className="spread" style={{ flexWrap: "wrap", gap: 16, marginBottom: 10 }}>
+            <div className="kv"><span className="k">median speedup</span>&nbsp;<span className="v">{bench.speedupMedian}×</span></div>
+            <div className="kv"><span className="k">reps/mode</span>&nbsp;<span className="v">{bench.repetitions}</span></div>
+            <div className="kv"><span className="k">comparable</span>&nbsp;<Badge tone={bench.comparability.comparable ? "ok" : "warn"}>{bench.comparability.comparable ? "matched" : "mismatched"}</Badge></div>
+          </div>
+          <table className="metrics">
+            <thead><tr><th>Mode</th><th>min</th><th>median</th><th>p95</th><th>max</th><th>stdev</th><th>fails</th><th>Provenance</th></tr></thead>
+            <tbody>
+              <DistRow label="Baseline (sequential)" d={bench.baseline} />
+              <DistRow label="Optimized" d={bench.optimized} />
+            </tbody>
+          </table>
+          <p className="mono faint" style={{ fontSize: 10.5, marginTop: 10, marginBottom: 0, lineHeight: 1.6 }}>{bench.note}</p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function DistRow({ label, d }: { label: string; d: BenchmarkResult["baseline"] }) {
+  return (
+    <tr>
+      <td>{label}</td>
+      <td className="mono">{ms(d.totalMs.min)}</td>
+      <td className="mono">{ms(d.totalMs.median)}</td>
+      <td className="mono">{ms(d.totalMs.p95)}</td>
+      <td className="mono">{ms(d.totalMs.max)}</td>
+      <td className="mono">{ms(d.totalMs.stdev)}</td>
+      <td className="mono">{d.failures}</td>
+      <td><Label kind="measured" /></td>
+    </tr>
   );
 }
 
 function ComparisonBody({ cmp }: { cmp: Cmp }) {
   const m = cmp.metrics;
   const faster = m.deltaMs.value > 0;
-  const sameWf = cmp.baseline.workflowId === cmp.optimized.workflowId;
+  const comp = cmp.comparability;
 
   return (
     <div className="stack" style={{ gap: 16 }}>
-      {!sameWf && <ErrorBlock message="These runs are from different workflows — comparison may not be meaningful." />}
+      {!comp.comparable && (
+        <ErrorBlock
+          message={
+            comp.fingerprintMissing
+              ? "Comparability unknown: one run predates input/config fingerprinting. Treat any delta cautiously."
+              : `These runs are NOT a matched pair (${comp.mismatches.join("; ")}). Any delta is apples-to-oranges.`
+          }
+        />
+      )}
+      {comp.comparable && (
+        <div className="row" style={{ gap: 8, fontSize: 12 }}>
+          <Badge tone="ok">matched pair</Badge>
+          <span className="mono faint">same workflow · version · inputs · config (fingerprint-verified)</span>
+        </div>
+      )}
 
       {/* Headline */}
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))" }}>
@@ -114,9 +216,31 @@ function ComparisonBody({ cmp }: { cmp: Cmp }) {
           </tbody>
         </table>
         <p className="mono faint" style={{ fontSize: 11, marginTop: 12, marginBottom: 0, lineHeight: 1.6 }}>
-          {cmp.note} Token counts and cost are simulated/estimated demo values — not real provider charges.
+          {cmp.note} Cost is an estimate from a local price table — never a real provider charge; unknown cost shows as “unknown”, not $0.
         </p>
       </Panel>
+
+      {cmp.answer && (
+        <Panel title="ANSWER COMPARISON" right={<Label kind="estimate" />}>
+          <div className="spread" style={{ flexWrap: "wrap", gap: 16 }}>
+            <div className="kv"><span className="k">lexical similarity</span>&nbsp;<span className="v">{(cmp.answer.similarity * 100).toFixed(0)}%</span></div>
+            <div className="kv">
+              <span className="k">cited sources match</span>&nbsp;
+              <Badge tone={cmp.answer.sameCitedSources ? "ok" : "warn"}>{cmp.answer.sameCitedSources ? "yes" : "differ"}</Badge>
+            </div>
+            <div className="kv"><span className="k">required checks agree</span>&nbsp;
+              <Badge tone={cmp.validationMatch ? "ok" : "danger"}>{cmp.validationMatch ? "yes" : "no"}</Badge>
+            </div>
+          </div>
+          <div className="row" style={{ gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+            <span className="mono faint" style={{ fontSize: 11 }}>baseline cites: {cmp.answer.baselineCitations.join(", ") || "none"}</span>
+            <span className="mono faint" style={{ fontSize: 11 }}>optimized cites: {cmp.answer.optimizedCitations.join(", ") || "none"}</span>
+          </div>
+          <p className="mono faint" style={{ fontSize: 10.5, marginTop: 8, marginBottom: 0, lineHeight: 1.6 }}>
+            {cmp.answer.note}
+          </p>
+        </Panel>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
         <Panel title="BASELINE WATERFALL"><Waterfall run={cmp.baseline} /></Panel>

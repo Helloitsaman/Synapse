@@ -1,37 +1,70 @@
 /**
- * Lightweight local persistence.
+ * Lightweight local persistence (PROTOTYPE durability).
  *
  * Workflow definitions and run SUMMARIES are persisted to JSON files. Run
  * context (node I/O bodies) is ephemeral by default and never written. Live runs
  * are held in memory while executing so the API can poll their status.
+ *
+ * Durability hardening within the prototype's scope:
+ *  - writes are ATOMIC (write a temp file, then rename over the target) so a
+ *    crash mid-write cannot leave a half-written JSON file;
+ *  - a corrupt file is NOT silently treated as empty — it is backed up and the
+ *    corruption is logged, so data loss is visible rather than hidden;
+ *  - a retention cap bounds how many finished runs are retained on disk.
+ *
+ * This is still NOT safe for concurrent multi-process hosted use; a transactional
+ * database with migrations and backups is required before that (see docs).
  */
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { RunRecord, Workflow } from "../types.js";
 import { SAMPLE_WORKFLOWS } from "../workflows/samples.js";
+import { log } from "../telemetry/logger.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.SYNAPSE_DATA_DIR ?? join(__dirname, "../../data");
 const WORKFLOWS_FILE = join(DATA_DIR, "workflows.json");
 const RUNS_FILE = join(DATA_DIR, "runs.json");
 
+/** Max finished runs retained on disk (oldest dropped first). 0 = unlimited. */
+const MAX_RUNS = Math.max(0, Number(process.env.SYNAPSE_MAX_RUNS ?? 200));
+
 function ensureDir() {
   if (!existsSync(DATA_DIR)) mkdirSync(DATA_DIR, { recursive: true });
 }
 
+/**
+ * Read + parse JSON. On a parse failure the corrupt file is preserved (renamed
+ * aside) and the event is logged — we never silently discard persistent data.
+ */
 function readJson<T>(file: string, fallback: T): T {
   try {
     if (!existsSync(file)) return fallback;
     return JSON.parse(readFileSync(file, "utf8")) as T;
-  } catch {
+  } catch (err) {
+    const backup = `${file}.corrupt-${Date.now()}`;
+    try {
+      renameSync(file, backup);
+    } catch {
+      /* best-effort; keep going with fallback */
+    }
+    log("error", "store.corrupt_file", {
+      file,
+      backup,
+      error: (err as Error).message,
+      message: "Persisted data was unreadable and has been set aside for inspection (not deleted).",
+    });
     return fallback;
   }
 }
 
+/** Atomic write: temp file then rename over the target. */
 function writeJson(file: string, value: unknown) {
   ensureDir();
-  writeFileSync(file, JSON.stringify(value, null, 2), "utf8");
+  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
+  renameSync(tmp, file);
 }
 
 export class Store {
@@ -89,6 +122,7 @@ export class Store {
   finalizeRun(run: RunRecord) {
     this.liveRuns.delete(run.id);
     this.runs.set(run.id, run);
+    this.enforceRetention();
     this.persistRuns();
   }
   listRuns(): RunRecord[] {
@@ -107,6 +141,14 @@ export class Store {
   clearRuns() {
     this.runs.clear();
     this.persistRuns();
+  }
+  /** Drop the oldest finished runs beyond the retention cap (visible in logs). */
+  private enforceRetention() {
+    if (MAX_RUNS === 0 || this.runs.size <= MAX_RUNS) return;
+    const ordered = [...this.runs.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const dropCount = this.runs.size - MAX_RUNS;
+    for (let i = 0; i < dropCount; i++) this.runs.delete(ordered[i].id);
+    log("info", "store.retention_evict", { dropped: dropCount, cap: MAX_RUNS });
   }
   private persistRuns() {
     writeJson(RUNS_FILE, [...this.runs.values()]);

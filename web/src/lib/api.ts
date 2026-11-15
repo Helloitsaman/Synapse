@@ -1,5 +1,5 @@
 import type {
-  AppConfig, CompileResult, Integrations, IR, OptimizationPlan,
+  AppConfig, BenchmarkResult, CompileResult, Integrations, IR, OptimizationPlan,
   RunComparison, RunRecord, RunSummary, WorkflowSummary,
 } from "./types";
 
@@ -41,10 +41,15 @@ export const api = {
     req<{ ok: boolean }>(`/workflows/${id}`, { method: "DELETE" }),
   preview: (id: string) =>
     req<{ ir: IR; plan: OptimizationPlan }>(`/workflows/${id}/optimize/preview`, { method: "POST" }),
-  startRun: (workflowId: string, mode: "baseline" | "optimized", concurrency?: number) =>
+  startRun: (
+    workflowId: string,
+    mode: "baseline" | "optimized",
+    concurrency?: number,
+    workflowInputs?: Record<string, unknown>,
+  ) =>
     req<RunRecord>("/runs", {
       method: "POST",
-      body: JSON.stringify({ workflowId, mode, concurrency }),
+      body: JSON.stringify({ workflowId, mode, concurrency, workflowInputs }),
     }),
   runs: () => req<RunSummary[]>("/runs"),
   run: (id: string) => req<RunRecord>(`/runs/${id}`),
@@ -52,6 +57,16 @@ export const api = {
   deleteRun: (id: string) => req<{ ok: boolean }>(`/runs/${id}`, { method: "DELETE" }),
   compare: (baseline: string, optimized: string) =>
     req<RunComparison>(`/compare?baseline=${baseline}&optimized=${optimized}`),
+  benchmark: (
+    workflowId: string,
+    repetitions: number,
+    concurrency?: number,
+    workflowInputs?: Record<string, unknown>,
+  ) =>
+    req<BenchmarkResult>("/benchmark", {
+      method: "POST",
+      body: JSON.stringify({ workflowId, repetitions, concurrency, workflowInputs }),
+    }),
   integrations: () => req<Integrations>("/integrations"),
 };
 

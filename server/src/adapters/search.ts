@@ -16,6 +16,7 @@ import type { Adapter, AdapterContext, AdapterResult } from "./contract.js";
 import { ADAPTER_CONTRACT_VERSION, AdapterError } from "./contract.js";
 import type { SourceRecord, Usage, WorkflowNode } from "../types.js";
 import { DEFAULT_MAX_RESULTS, citePrefix, makeSourceId } from "./research.js";
+import { parseRetryAfterMs } from "./modelBase.js";
 
 type ProviderId = "tavily" | "brave" | "serpapi";
 
@@ -190,11 +191,19 @@ export class SearchAdapter implements Adapter {
       throw new AdapterError(`Search provider unreachable: ${(err as Error).message}`, "PROVIDER_UNREACHABLE");
     }
     if (res.status === 429) {
-      throw new AdapterError(`${provider} rate limit (429). Retry later or lower concurrency.`, "RATE_LIMITED");
+      throw new AdapterError(
+        `${provider} rate limit (429). Retry later or lower concurrency.`,
+        "RATE_LIMITED",
+        { status: 429, retryAfterMs: parseRetryAfterMs(res) },
+      );
     }
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new AdapterError(`${provider} returned ${res.status}: ${body.slice(0, 160)}`, "PROVIDER_ERROR");
+      const code = res.status >= 500 ? "PROVIDER_OVERLOADED" : "PROVIDER_ERROR";
+      throw new AdapterError(`${provider} returned ${res.status}: ${body.slice(0, 160)}`, code, {
+        status: res.status,
+        retryAfterMs: parseRetryAfterMs(res),
+      });
     }
     return res.json();
   }

@@ -1,8 +1,12 @@
 /**
- * Cost ESTIMATION. These are calculated figures from a demo price table, not a
- * charge from any provider. Always surfaced to the UI labelled "estimated".
+ * Cost ESTIMATION. These are calculated figures from a local price table, not a
+ * charge from any provider. Always surfaced labelled "estimated", and UNKNOWN
+ * cost is represented as `null` — never rendered as a $0 charge.
  */
-import type { Usage } from "../types.js";
+import type { CostEstimate, Usage } from "../types.js";
+
+/** Version + date of the local price table (shown for auditability). */
+export const PRICING_VERSION = "synapse-local-pricetable@2026-11-15";
 
 /**
  * Prices in USD per 1K tokens. The synapse-sim-* rows are illustrative demo
@@ -24,12 +28,36 @@ export const DEMO_PRICES: Record<string, { in: number; out: number }> = {
 };
 
 /**
- * Returns an ESTIMATED cost, or null when it cannot be estimated (a real
- * provider ran but reported no usage — we never invent tokens or cost).
+ * Returns a labelled cost estimate. `usd` is null (label "unavailable") when the
+ * cost cannot be estimated — a real provider ran but reported no usage (we never
+ * invent tokens or cost), or there was no model/token work at all. A simulated
+ * run still gets an estimate (clearly labelled), because its token counts are
+ * known demo values.
  */
-export function estimateCostUsd(usage: Usage, model?: string): number {
-  if (usage.source === "unavailable" || usage.source === "none") return 0;
-  const price = DEMO_PRICES[model ?? usage.model ?? "default"] ?? DEMO_PRICES.default;
+export function estimateCost(usage: Usage, model?: string): CostEstimate {
+  const resolvedModel = model ?? usage.model;
+  // Unknown: a real provider ran but gave no usage. Unknown ≠ free.
+  if (usage.source === "unavailable") {
+    return { usd: null, label: "unavailable", pricingSource: PRICING_VERSION, modelMatched: false, model: resolvedModel };
+  }
+  // No token-bearing work (retrieval/transform only) → genuinely $0, not unknown.
+  if (usage.source === "none") {
+    return { usd: 0, label: "estimated", pricingSource: PRICING_VERSION, modelMatched: false, model: resolvedModel };
+  }
+  const key = resolvedModel ?? "default";
+  const modelMatched = Object.prototype.hasOwnProperty.call(DEMO_PRICES, key);
+  const price = DEMO_PRICES[key] ?? DEMO_PRICES.default;
   const cost = (usage.inputTokens / 1000) * price.in + (usage.outputTokens / 1000) * price.out;
-  return Math.round(cost * 1e6) / 1e6;
+  return {
+    usd: Math.round(cost * 1e6) / 1e6,
+    label: "estimated",
+    pricingSource: PRICING_VERSION,
+    modelMatched,
+    model: resolvedModel,
+  };
+}
+
+/** Back-compat numeric helper: estimated USD, or null when unknown. */
+export function estimateCostUsd(usage: Usage, model?: string): number | null {
+  return estimateCost(usage, model).usd;
 }

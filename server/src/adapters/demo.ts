@@ -13,7 +13,7 @@
  */
 import type { Adapter, AdapterContext, AdapterResult } from "./contract.js";
 import { ADAPTER_CONTRACT_VERSION, AdapterError } from "./contract.js";
-import type { SourceRecord, Usage, WorkflowNode } from "../types.js";
+import type { Provenance, SourceRecord, Usage, WorkflowNode } from "../types.js";
 import { contentHash } from "../util/hash.js";
 import {
   buildDocument,
@@ -111,7 +111,14 @@ export class DemoAdapter implements Adapter {
     await sleep(simDurationMs(node), signal);
     const output = this.computeOutput(node, inputs, ctx.workflowInputs);
     const sources = (output as any)?.sources as SourceRecord[] | undefined;
-    return { output, usage: simUsage(node), provenance: "demo", sources };
+    // A deterministic formatter does no model/retrieval work of its own — it
+    // re-assembles whatever it was given. If that data is live, this node
+    // carries live provenance so a fully-live run is not mislabelled MIXED by
+    // its formatting step. Otherwise it is demo output.
+    const carried = (output as any)?.provenance as Provenance | undefined;
+    const provenance: Provenance =
+      node.op === "transform" && carried ? carried : "demo";
+    return { output, usage: simUsage(node), provenance, sources };
   }
 
   private computeOutput(

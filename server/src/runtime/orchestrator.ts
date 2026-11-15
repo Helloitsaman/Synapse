@@ -8,18 +8,22 @@ import { buildOptimizationPlan } from "../optimizer/optimizer.js";
 import { executeRun } from "./scheduler.js";
 import { runCorrectness } from "../correctness/checks.js";
 import { extractResult } from "./result.js";
-import { compareRuns } from "./compare.js";
+import { assessComparability, compareRuns } from "./compare.js";
+import { computeFingerprint } from "./fingerprint.js";
 import { instrumentRun } from "../telemetry/instrument.js";
 import { log } from "../telemetry/logger.js";
 import { defaultRegistry } from "../adapters/registry.js";
 import { store } from "../store/store.js";
 import type {
+  BenchmarkResult,
   CompileResult,
+  Distribution,
   IR,
   OptimizationPlan,
   RunComparison,
   RunMode,
   RunRecord,
+  Workflow,
 } from "../types.js";
 
 export class WorkflowNotFound extends Error {}
@@ -89,6 +93,11 @@ export function startRun(input: StartRunInput): RunRecord {
   const abort = new AbortController();
   cancelControllers.set(runId, abort);
 
+  // Resolve effective inputs once (with the documented default) so the same
+  // values drive both execution and the comparability fingerprint.
+  const effectiveInputs = input.workflowInputs ?? { topic: "Q4 sector outlook" };
+  const fingerprint = computeFingerprint(wf, ir, effectiveInputs, input.mode, concurrency);
+
   // Seed a pending live record so the UI can poll immediately.
   const seed: RunRecord = {
     id: runId,
@@ -116,8 +125,10 @@ export function startRun(input: StartRunInput): RunRecord {
       sourceCount: 0,
     })),
     usage: { calls: 0, inputTokens: 0, outputTokens: 0, source: "simulated" },
-    estimatedCostUsd: 0,
+    estimatedCostUsd: null,
+    cost: { usd: null, label: "unavailable", pricingSource: "", modelMatched: false },
     appliedTransformations,
+    fingerprint,
   };
   store.setLiveRun(seed);
 
@@ -129,11 +140,15 @@ export function startRun(input: StartRunInput): RunRecord {
         concurrency,
         memoize,
         registry: defaultRegistry,
-        workflowInputs: input.workflowInputs ?? { topic: "Q4 sector outlook" },
+        workflowInputs: effectiveInputs,
         appliedTransformations,
         cancelSignal: abort.signal,
-        onEvent: (r) => store.setLiveRun(r),
+        onEvent: (r) => {
+          r.fingerprint = fingerprint;
+          store.setLiveRun(r);
+        },
       });
+      record.fingerprint = fingerprint;
 
       // Extract the delivered answer (persisted) before bodies are discarded.
       if (record.status === "succeeded") {
@@ -178,6 +193,162 @@ export function startRun(input: StartRunInput): RunRecord {
   })();
 
   return seed;
+}
+
+/** Resolve the concurrency/memoization/transformations for a mode. */
+function planFor(
+  plan: OptimizationPlan,
+  mode: RunMode,
+  concurrency?: number,
+): { concurrency: number; memoize: boolean; appliedTransformations: string[] } {
+  if (mode === "optimized") {
+    return {
+      concurrency: concurrency ?? plan.suggestedConcurrency,
+      memoize: plan.memoizationEnabled,
+      appliedTransformations: plan.decisions.filter((d) => d.status === "accepted").map((d) => d.id),
+    };
+  }
+  return { concurrency: 1, memoize: false, appliedTransformations: [] };
+}
+
+/** Execute one run to completion (awaited), persist it, and return the record. */
+async function executeAndFinalize(
+  wf: Workflow,
+  ir: IR,
+  mode: RunMode,
+  concurrency: number,
+  memoize: boolean,
+  appliedTransformations: string[],
+  inputs: Record<string, unknown>,
+): Promise<RunRecord> {
+  const runId = newRunId();
+  const fingerprint = computeFingerprint(wf, ir, inputs, mode, concurrency);
+  const { record, outputs } = await executeRun(wf, ir, runId, {
+    mode,
+    concurrency,
+    memoize,
+    registry: defaultRegistry,
+    workflowInputs: inputs,
+    appliedTransformations,
+  });
+  record.fingerprint = fingerprint;
+  if (record.status === "succeeded") {
+    record.result = extractResult(ir, outputs);
+    record.validation = runCorrectness({ workflowId: wf.id, outputs, ir });
+    if (!record.validation.passed) {
+      record.status = "failed";
+      record.error = "One or more required correctness checks failed.";
+    }
+  }
+  instrumentRun(record);
+  store.finalizeRun(record);
+  return record;
+}
+
+export interface BenchmarkInput {
+  workflowId: string;
+  repetitions: number;
+  concurrency?: number;
+  workflowInputs?: Record<string, unknown>;
+}
+
+const MAX_BENCHMARK_REPS = 10;
+
+/**
+ * Paired, repeated benchmark: runs N baseline + N optimized executions of the
+ * SAME workflow + inputs in interleaved order (alternating which mode leads each
+ * round to reduce ordering bias) and reports distributions — never a single
+ * sample, never an unqualified significance claim.
+ */
+export async function runBenchmark(input: BenchmarkInput): Promise<BenchmarkResult> {
+  const wf = store.getWorkflow(input.workflowId);
+  if (!wf) throw new WorkflowNotFound(`Unknown workflow "${input.workflowId}".`);
+  const compiled = compileWorkflow(wf);
+  if (!compiled.ok || !compiled.ir) {
+    throw new CompileFailed(compiled.errors.map((e) => e.message).join("; "));
+  }
+  const ir = compiled.ir;
+  const plan = buildOptimizationPlan(wf, ir);
+  const reps = Math.max(1, Math.min(MAX_BENCHMARK_REPS, Math.floor(input.repetitions)));
+  const inputs = input.workflowInputs ?? { topic: "Q4 sector outlook" };
+
+  const basePlan = planFor(plan, "baseline");
+  const optPlan = planFor(plan, "optimized", input.concurrency);
+
+  const order: BenchmarkResult["order"] = [];
+  const baselineRuns: RunRecord[] = [];
+  const optimizedRuns: RunRecord[] = [];
+
+  for (let i = 0; i < reps; i++) {
+    const sequence: RunMode[] = i % 2 === 0 ? ["baseline", "optimized"] : ["optimized", "baseline"];
+    for (const mode of sequence) {
+      const p = mode === "baseline" ? basePlan : optPlan;
+      const rec = await executeAndFinalize(wf, ir, mode, p.concurrency, p.memoize, p.appliedTransformations, inputs);
+      (mode === "baseline" ? baselineRuns : optimizedRuns).push(rec);
+      order.push({ mode, runId: rec.id, totalMs: rec.totalMs, status: rec.status });
+    }
+  }
+
+  const baseline = modeResult("baseline", baselineRuns);
+  const optimized = modeResult("optimized", optimizedRuns);
+  const speedupMedian =
+    optimized.totalMs.median > 0 ? Math.round((baseline.totalMs.median / optimized.totalMs.median) * 100) / 100 : 1;
+
+  // All runs share workflow + inputs by construction → comparable.
+  const comparability =
+    baselineRuns[0] && optimizedRuns[0]
+      ? assessComparability(baselineRuns[0], optimizedRuns[0])
+      : { comparable: true, sameWorkflow: true, sameWorkflowVersion: true, sameInputs: true, sameConfig: true, mismatches: [], fingerprintMissing: false };
+
+  return {
+    workflowId: wf.id,
+    workflowVersion: wf.version,
+    repetitions: reps,
+    order,
+    baseline,
+    optimized,
+    speedupMedian,
+    comparability,
+    baselineKind: "synapse-sequential-graph",
+    note:
+      `Paired benchmark: ${reps} run(s) per mode, interleaved. Baseline = sequential ` +
+      `graph execution (concurrency 1), NOT a host-native chat prompt. Distributions ` +
+      `are measured wall-clock; spread reflects real run-to-run/provider variation. ` +
+      `${baseline.failures + optimized.failures} run(s) failed. A median speedup is a ` +
+      `summary, not a significance test.`,
+  };
+}
+
+function modeResult(mode: RunMode, runs: RunRecord[]) {
+  const succeeded = runs.filter((r) => r.status === "succeeded");
+  return {
+    mode,
+    runIds: runs.map((r) => r.id),
+    failures: runs.length - succeeded.length,
+    totalMs: distribution(succeeded.map((r) => r.totalMs), "ms"),
+    overheadMs: distribution(succeeded.map((r) => r.overheadMs), "ms"),
+  };
+}
+
+/** Summary statistics for a set of measured samples. */
+export function distribution(values: number[], unit: string): Distribution {
+  const vals = [...values].sort((a, b) => a - b);
+  const n = vals.length;
+  const mean = n ? vals.reduce((a, b) => a + b, 0) / n : 0;
+  const variance = n ? vals.reduce((a, b) => a + (b - mean) ** 2, 0) / n : 0;
+  const pct = (p: number) => (n ? vals[Math.min(n - 1, Math.floor(p * (n - 1) + 0.5))] : 0);
+  return {
+    samples: n,
+    min: n ? vals[0] : 0,
+    median: pct(0.5),
+    p95: pct(0.95),
+    max: n ? vals[n - 1] : 0,
+    mean: Math.round(mean * 100) / 100,
+    stdev: Math.round(Math.sqrt(variance) * 100) / 100,
+    unit,
+    label: "measured",
+    values,
+  };
 }
 
 export function cancelRun(runId: string): boolean {

@@ -77,8 +77,8 @@ export function RunDetails() {
               right={
                 <div className="row" style={{ gap: 8 }}>
                   {run.execution && (
-                    <Badge tone={run.execution.liveExecution ? "ok" : "violet"}>
-                      {run.execution.liveExecution ? "LIVE" : "DEMO"}
+                    <Badge tone={run.execution.provenanceMode === "live" ? "ok" : run.execution.provenanceMode === "mixed" ? "warn" : "violet"}>
+                      {run.execution.provenanceMode.toUpperCase()}
                     </Badge>
                   )}
                   <Badge tone={statusDot(run.status).split(" ")[0]} pulse={run.status === "running"}>{run.status}</Badge>
@@ -94,7 +94,7 @@ export function RunDetails() {
                 <KV k="overhead" v={ms(run.overheadMs)} label="measured" />
                 <KV k="calls" v={int(run.usage.calls)} label={run.usage.source} />
                 <KV k="tokens" v={int(run.usage.inputTokens + run.usage.outputTokens)} label={run.usage.source} />
-                <KV k="est.cost" v={usd(run.estimatedCostUsd)} label="estimated" />
+                <KV k="est.cost" v={usd(run.estimatedCostUsd)} label={run.cost?.label ?? "estimated"} />
               </div>
               {run.execution && (
                 <div className="spread" style={{ flexWrap: "wrap", gap: 16, marginTop: 10 }}>
@@ -102,6 +102,11 @@ export function RunDetails() {
                   {run.execution.providers.length > 0 && <KV k="providers" v={run.execution.providers.join(", ")} />}
                   <KV k="sources" v={int(run.execution.sourceCount)} />
                   <KV k="live/demo nodes" v={`${run.execution.liveNodeCount}/${run.execution.demoNodeCount}`} />
+                </div>
+              )}
+              {run.execution?.provenanceMode === "mixed" && (
+                <div className="mono faint" style={{ fontSize: 10.5, marginTop: 8 }}>
+                  ⚠ MIXED provenance — part of this output came from demo adapters. See per-node provenance below.
                 </div>
               )}
               {run.error && <div style={{ marginTop: 12 }}><ErrorBlock message={run.error} /></div>}

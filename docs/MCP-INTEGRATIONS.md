@@ -19,7 +19,8 @@ terminal.
 | `synapse_import_workflow` | Validate and save a workflow definition | Yes, saves workflow |
 | `synapse_start_workflow_run` | Start baseline or optimized execution | Yes, may call model/tool adapters |
 | `synapse_get_run_result` | Read run state, spans, usage, and validation | No |
-| `synapse_compare_runs` | Compare baseline and optimized run IDs | No |
+| `synapse_compare_runs` | Compare baseline and optimized run IDs (flags matched vs. mismatched pairs) | No |
+| `synapse_benchmark_workflow` | Paired, repeated benchmark (N interleaved runs/mode) → median/p95/spread | Yes, may call model/tool adapters |
 
 Tool descriptions instruct hosts to preview first and only execute when the user
 asked for a run. Hosts and users should still review tool calls; descriptions and
@@ -49,6 +50,13 @@ MCP support belongs to the **host application or API integration**, not to a
 model name by itself. Support below is based on the vendors' current docs; local
 SYNAPSE MCP protocol checks do not replace installing and end-to-end testing in
 each vendor's product.
+
+> **Verification status (this project):** only **Claude Code (local stdio)** has
+> been verified end-to-end here. Every other row is the standard MCP path per the
+> vendor's docs but is **untested by this project** — treat it as "should work,
+> not yet verified", and verify auth/reconnection in your own environment. The
+> live `/integrations` host matrix carries a per-host `verification` level
+> (`verified` / `expected` / `untested`).
 
 | Host/application | MCP connection documented by vendor | SYNAPSE status |
 | --- | --- | --- |

@@ -70,11 +70,19 @@ All optional — SYNAPSE runs fully in demo mode with none set. See
 [`.env.example`](./.env.example). Secrets are **server-side only** and never sent
 to the browser.
 
+**Loading:** copy `.env.example` to `server/.env` (loaded automatically at
+startup) **or** export the variables in your shell. Shell/OS variables always
+take precedence over the file. Override the file path with `SYNAPSE_ENV_FILE`.
+PowerShell: `$env:OPENAI_API_KEY = "sk-..."`; Bash: `OPENAI_API_KEY=sk-...`.
+
 | Variable | Default | Purpose |
 | -------- | ------- | ------- |
 | `PORT` | `4000` | Backend port |
 | `RATE_LIMIT` | `600` | Max API requests / IP / minute |
 | `SYNAPSE_DATA_DIR` | `server/data` | Where run summaries + workflow defs persist |
+| `SYNAPSE_MAX_RUNS` | `200` | Retention cap: max finished runs kept on disk (`0` = unlimited) |
+| `SYNAPSE_PERSIST_SOURCE_CONTENT` | `0` | Keep extracted page content+snippet in saved results (default: citation metadata + answer only) |
+| `SYNAPSE_ENV_FILE` | `server/.env` | Path to the `.env` file to load at startup |
 | `OPENAI_API_KEY` | — | Enables the opt-in OpenAI-compatible model adapter |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base URL |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Default model for `openai` llm nodes |
@@ -100,14 +108,23 @@ npm test            # backend unit + integration + API tests (vitest)
 npm run typecheck   # strict TypeScript typecheck for server + web
 ```
 
-**Latest result:** `69 passed (69)` across 11 files — compiler validation & cycle
-detection, scheduler dependencies/concurrency/cancellation/retries, optimizer
-preconditions & no-op, correctness/citation validation, API behaviour, MCP tool
+**Latest result:** `84 passed (84)` across 15 files — compiler validation & cycle
+detection, scheduler dependencies/concurrency/cancellation, **retry
+classification** (idempotent + transient-only, no duplicate non-idempotent
+calls), optimizer preconditions & no-op, correctness/citation validation, **cost
+provenance** (unknown ≠ $0), **comparability fingerprints + paired benchmark
+distributions**, **prompt-injection source delimiting**, API behaviour, MCP tool
 discovery/input validation, **live search adapter** parsing/errors/rate-limit/
 cancellation, **model adapters** (OpenAI/Anthropic/Gemini) usage provenance &
 citation extraction, and an **end-to-end live slice** (search → model → cited
 answer) run against deterministic fake providers. Live tests use fake servers, so
 no paid API credentials are needed to run the suite.
+
+For an **opt-in real-provider smoke test** (costs real quota), configure a search
++ model provider, then run `npm --prefix server run smoke:live` — it runs the
+live workflow once and prints a redacted report (provider/model exercised,
+provider-reported usage, estimated cost, correctness, answer excerpt). Record the
+model/API version you used. Routine CI keeps using the fake-provider tests.
 
 ## Architecture
 
@@ -183,9 +200,11 @@ Total latency and SYNAPSE overhead are measured and reported **separately**.
 
 ### Measurement provenance
 Every number is tagged: **measured** (wall-clock, counts), **provider-reported**
-(when a real provider returns usage), **estimated** (cost), or **simulated**
-(demo usage). Comparisons use the same workflow + input, show the sample count
-(1 per mode by default), and never imply statistical significance. If the
+(when a real provider returns usage), **estimated** (cost), **simulated** (demo
+usage), or **unavailable** (unknown — e.g. a provider that reported no usage;
+cost then shows as *unknown*, never `$0`). Each run carries a privacy-safe
+fingerprint, so a comparison states whether the two runs are a **matched pair**;
+the **paired benchmark** reports median/p95/spread over N interleaved runs. If the
 optimized run is similar or slower, SYNAPSE shows that honestly.
 
 ## API reference
@@ -204,14 +223,15 @@ failures return `422` with `{ ok:false, errors:[{code,message,nodeId?,path?}] }`
 | `POST /workflows` | Validate + import/save a workflow |
 | `DELETE /workflows/:id` | Delete an imported workflow (built-in samples are protected) |
 | `POST /workflows/:id/optimize/preview` | IR + optimization plan |
-| `POST /runs` | Start a run `{ workflowId, mode, concurrency? }` |
+| `POST /runs` | Start a run `{ workflowId, mode, concurrency?, workflowInputs? }` |
 | `GET /runs` | List run summaries |
 | `GET /runs/:id` | Full run record (spans + validation) |
 | `GET /runs/:id/events` | **SSE** live node-state stream (poll `GET /runs/:id` as fallback) |
 | `POST /runs/:id/cancel` | Cancel an active run |
 | `DELETE /runs/:id` | Delete a persisted run |
-| `GET /compare?baseline=&optimized=` | Labelled comparison |
-| `GET /integrations` | Adapter capability matrix + host matrix + telemetry status |
+| `GET /compare?baseline=&optimized=` | Labelled comparison + fingerprint comparability + answer-diff estimate |
+| `POST /benchmark` | Paired repeated benchmark `{ workflowId, repetitions(1-10), concurrency?, workflowInputs? }` → distributions |
+| `GET /integrations` | Adapter capability matrix + host matrix (with verification) + telemetry status |
 | `POST /mcp` | Stateless Streamable HTTP MCP endpoint (POST JSON-RPC) |
 
 ## Live research slice (opt-in)
@@ -321,7 +341,20 @@ node examples/import-workflow.mjs  # in another — compiles, imports, runs, com
 - **Redaction:** prompt/output bodies are redacted from logs/traces by default;
   secrets are never logged. Telemetry is metadata-only.
 - **Ephemeral run context:** node I/O bodies are not persisted; only run
-  summaries + workflow defs are. Runs are deletable.
+  summaries, the delivered answer, and **citation metadata** are. By default the
+  provider-extracted page **content and snippet are dropped** from the persisted
+  result (set `SYNAPSE_PERSIST_SOURCE_CONTENT=1` to retain them, and update your
+  retention policy). Runs are deletable; a retention cap bounds stored runs.
+- **Untrusted retrieved content:** source text is delimited as untrusted data in
+  model prompts, and the system prompt instructs the model not to follow
+  instructions embedded in it. Prompt wording is a mitigation, not a security
+  boundary — tool permissions are enforced independently of model output.
+- **Durable, visible persistence:** writes are atomic (temp-file + rename); a
+  corrupt data file is backed up and logged rather than silently treated as empty.
+- **Honest unknown cost:** when a real provider returns no usage, cost is reported
+  as **unknown (`null`)**, never as a misleading `$0`. Usage provenance
+  (`provider-reported` / `simulated` / `unavailable` / `none`) is preserved
+  distinctly, and the local price table's version/date is surfaced.
 - **SSRF protection:** the HTTP tool adapter enforces a host allowlist, blocks
   private/loopback/metadata IP ranges (including IPv4-mapped IPv6), refuses
   redirects and credentials-in-URL, and caps response size. The outbound
@@ -338,21 +371,42 @@ node examples/import-workflow.mjs  # in another — compiles, imports, runs, com
 - **Input limits:** JSON body cap, per-IP rate limiting (with a bounded,
   self-pruning client table), bounded timeouts, safe error responses that don't
   leak internals.
-- **No hidden-context claims:** the host matrix describes each AI app accurately
-  (workflow-optimization / model-tool-gateway / telemetry-only / unsupported).
-  SYNAPSE does not claim access to private model context or transparent
-  interception.
+- **Retry safety:** the scheduler retries only **transient** failures (timeouts,
+  429/5xx, unreachable) and only for nodes declared **`idempotent`**; a
+  non-idempotent node is capped at one attempt so a paid call or external action
+  is never silently duplicated. Retries honor `Retry-After` and use bounded
+  jittered backoff.
+- **No hidden-context claims:** the host matrix describes each integration
+  accurately and marks each one **verified / expected / untested** end-to-end
+  (Claude Code local stdio MCP is verified; remote endpoints and other clients are
+  not yet). SYNAPSE does not claim access to private model context, a host's
+  subscription, or transparent interception; a model supporting MCP elsewhere does
+  not imply its chat app can install this server.
 
 ## Known limitations
 
 - **Demo values are simulated.** With the demo adapter, node outputs, token
   counts and therefore costs are illustrative — labelled `simulated` /
   `estimated` throughout. Only wall-clock, counts and overhead are `measured`.
-- **Single sample per mode.** Comparisons run once per mode by default; timings
-  vary run-to-run and are not a statistically significant benchmark.
-- **Persistence is a JSON file store**, suitable for a local prototype (chosen
-  over a native DB for zero-build portability on Windows). Not for concurrent
-  multi-process use.
+- **Matched-run comparisons + paired benchmark.** Each run stores a privacy-safe
+  (non-reversible) fingerprint of its workflow version, normalized inputs, and
+  adapter/model/config; the comparison view marks a pair as matched or
+  **apples-to-oranges**. A single pair is still just one sample — use the
+  **paired benchmark** (`POST /benchmark`, or the `synapse_benchmark_workflow`
+  MCP tool, or the Run Comparison page) for N interleaved runs per mode reported
+  as median / p95 / spread / failures. "Baseline" means sequential execution of
+  the **same SYNAPSE graph**, not a user's normal Claude chat prompt.
+- **Correctness ≠ factual accuracy.** Structural checks (schema, required
+  sections) and citation-resolution (every cited id resolves to a retrieved
+  source, no invented ids) are deterministic. Grounding/relevance/claim-support
+  checks are labelled **heuristic estimates**, not a verification that a source
+  supports a claim or that claims are true — that needs human or LLM-judge review.
+- **Single-user local prototype.** Persistence is a JSON file store (chosen over a
+  native DB for zero-build portability on Windows); it is not safe for concurrent
+  multi-process use. There is no per-user identity, tenant isolation, OAuth, or
+  encrypted credential vault — **hosted multi-user is not implemented** and the
+  app advertises this (`/config` → `deployment.multiUserReady: false`). Provider
+  credentials are **server-level env settings**, not per-user accounts.
 - **Live model/search adapters are non-deterministic** and excluded from the
   deterministic demo comparison. Model adapters cover `llm` nodes; the `search`
   adapter covers `retrieval` nodes.

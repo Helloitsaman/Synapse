@@ -20,7 +20,9 @@ export const TRANSFORMATIONS = [
     id: "within-run-memoization",
     title: "Within-run memoization",
     description:
-      "Cache deterministic node outputs by canonicalized inputs within a single run.",
+      "Cache deterministic, side-effect-safe node outputs by WORK identity (op + " +
+      "adapter + model + canonical config + inputs, excluding node id) within a " +
+      "single run, so two nodes doing identical work share one result.",
   },
   {
     id: "no-op",
@@ -96,30 +98,50 @@ export function buildOptimizationPlan(wf: Workflow, ir: IR): OptimizationPlan {
 
   // --- Transformation 2: within-run memoization -------------------------
   const memoizable = wf.nodes.filter((n) => n.deterministic && n.sideEffectSafe);
-  const memoEnabled = memoizable.length > 0;
+  // Real reuse requires two ELIGIBLE nodes whose work identity could coincide —
+  // same op, adapter, and model (config/inputs are checked at runtime). Without
+  // at least two such nodes, the cache can never hit, so we report it honestly as
+  // dormant rather than claiming a benefit it cannot deliver on this workflow.
+  const workClasses = new Map<string, string[]>();
+  for (const n of memoizable) {
+    const key = `${n.op}|${n.provider.adapter}|${n.provider.model ?? ""}`;
+    (workClasses.get(key) ?? workClasses.set(key, []).get(key)!).push(n.id);
+  }
+  const reuseCandidates = [...workClasses.values()].filter((ids) => ids.length >= 2);
+  const canReuse = reuseCandidates.length > 0;
+  const memoEligible = memoizable.length > 0;
+  // Enable the cache whenever there are eligible nodes (it is always safe), but
+  // only ACCEPT (claim a benefit) when cross-node reuse is actually possible.
+  const memoEnabled = memoEligible;
   decisions.push({
     id: "within-run-memoization",
     title: "Within-run memoization",
-    rationale: memoEnabled
-      ? `Deterministic, side-effect-safe nodes can be memoized by canonicalized ` +
-        `inputs so an identical computation within this run is not repeated.`
-      : "No node is both deterministic and side-effect-safe.",
+    rationale: canReuse
+      ? `Two or more deterministic, side-effect-safe nodes share a work class ` +
+        `(op+adapter+model): ${reuseCandidates.map((g) => g.join("/")).join(", ")}. ` +
+        `If they also resolve to identical config+inputs at runtime, the second ` +
+        `reuses the first's result (the memo key excludes node identity).`
+      : memoEligible
+        ? `Eligible nodes exist but no two share a work class, so the identity-free ` +
+          `cache cannot hit on this workflow. Enabled (always safe) but dormant.`
+        : "No node is both deterministic and side-effect-safe.",
     preconditions: [
-      { description: "Node is deterministic", met: memoizable.length > 0 },
-      { description: "Node is side-effect-safe", met: memoizable.length > 0 },
+      { description: "At least one deterministic, side-effect-safe node", met: memoEligible },
+      { description: "Two+ nodes share a work class (op+adapter+model)", met: canReuse },
+      { description: "Never memoizes nondeterministic or side-effecting nodes", met: true },
       { description: "Scope limited to a single run (no cross-run cache)", met: true },
     ],
-    confidence: memoEnabled ? 0.6 : 0.1,
-    expectedBenefit: memoEnabled
-      ? "Avoids recomputation if identical inputs recur within the run."
-      : "None.",
-    // Memoization is enabled but typically dormant in the sample (no repeats).
-    status: memoEnabled ? "accepted" : "rejected",
-    reason: memoEnabled
-      ? `Enabled for ${memoizable.length} eligible node(s); only triggers on an ` +
-        `exact input match within the same run.`
-      : "No eligible nodes.",
-    affectedNodes: memoizable.map((n) => n.id),
+    confidence: canReuse ? 0.6 : 0.15,
+    expectedBenefit: canReuse
+      ? "Avoids recomputing identical work across nodes within the run."
+      : "None on this workflow (no cross-node reuse opportunity).",
+    status: canReuse ? "accepted" : "noop",
+    reason: canReuse
+      ? `Accepted for ${reuseCandidates.flat().length} node(s) across ${reuseCandidates.length} work class(es).`
+      : memoEligible
+        ? "Enabled but dormant: no two eligible nodes can collide. Reported honestly as a no-op."
+        : "No eligible nodes.",
+    affectedNodes: canReuse ? reuseCandidates.flat() : [],
   });
 
   // --- Transformation 3: no-op ------------------------------------------

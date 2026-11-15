@@ -42,7 +42,11 @@ export function instrumentRun(run: RunRecord): void {
       "synapse.usage.calls": run.usage.calls,
       "synapse.usage.tokens": run.usage.inputTokens + run.usage.outputTokens,
       "synapse.usage.source": run.usage.source,
-      "synapse.estimated_cost_usd": run.estimatedCostUsd,
+      // Cost may be UNKNOWN (null); surface -1 + a known flag rather than a
+      // misleading 0 that would read as a free run.
+      "synapse.estimated_cost_usd": run.estimatedCostUsd ?? -1,
+      "synapse.cost_known": run.estimatedCostUsd != null,
+      "synapse.provenance_mode": run.execution?.provenanceMode ?? "demo",
       "synapse.validation.passed": run.validation?.passed ?? false,
     },
   });

@@ -11,6 +11,7 @@ import type { AdapterRegistry } from "../adapters/registry.js";
 import type { Adapter } from "../adapters/contract.js";
 import { AdapterError } from "../adapters/contract.js";
 import type {
+  ExecutionSummary,
   IR,
   NodeSpan,
   NodeStatus,
@@ -22,7 +23,7 @@ import type {
   Workflow,
 } from "../types.js";
 import { contentHash } from "../util/hash.js";
-import { estimateCostUsd } from "./cost.js";
+import { estimateCost } from "./cost.js";
 
 export interface RunOptions {
   mode: RunMode;
@@ -92,6 +93,7 @@ export async function executeRun(
     spans: [...spans.values()],
     usage: { calls: 0, inputTokens: 0, outputTokens: 0, source: "simulated" },
     estimatedCostUsd: 0,
+    cost: { usd: 0, label: "estimated", pricingSource: "", modelMatched: false },
     appliedTransformations: opts.appliedTransformations ?? [],
   };
 
@@ -187,12 +189,19 @@ export async function executeRun(
       const inputs = resolveInputs(node.dependsOn, outputs);
 
       // Within-run memoization for deterministic, side-effect-safe nodes.
+      //
+      // The key deliberately EXCLUDES node identity. It is derived only from the
+      // work itself — op, adapter, model, canonical config, and resolved inputs —
+      // so two DIFFERENT nodes that compute the exact same thing share one cache
+      // entry (real cross-node reuse), while a node whose config/inputs differ
+      // never collides. Memoization is gated on deterministic && sideEffectSafe,
+      // so nondeterministic or side-effecting work is never cached.
       const memoKey =
         opts.memoize && node.deterministic && node.sideEffectSafe
           ? contentHash({
-              id: node.id,
               op: node.op,
-              model: node.provider.model,
+              adapter: node.provider.adapter,
+              model: node.provider.model ?? null,
               config: node.config,
               inputs,
             })
@@ -258,7 +267,8 @@ export async function executeRun(
 
   // Aggregate usage from non-memoized spans only (memoized incurs no new cost).
   record.usage = aggregateUsage(record.spans);
-  record.estimatedCostUsd = estimateCostUsd(record.usage);
+  record.cost = estimateCost(record.usage);
+  record.estimatedCostUsd = record.cost.usd;
   record.execution = summarizeExecution(record.spans, outputs);
 
   if (cancelled) record.status = "cancelled";
@@ -289,6 +299,40 @@ interface AttemptResult {
   error?: string;
   attempts: number;
   cancelled?: boolean;
+}
+
+/**
+ * Decide whether a failed attempt may be retried. A retry is allowed only when
+ * ALL of these hold:
+ *   1. the node is declared `idempotent` — so re-running cannot duplicate a paid
+ *      call's side effect or an external action after a timeout/partial failure;
+ *   2. attempts remain under maxAttempts;
+ *   3. the failure is TRANSIENT — a timeout, or an AdapterError whose code/HTTP
+ *      status is retryable (429/5xx/unreachable). A config/validation/4xx error
+ *      is never retried (it would only repeat the same failure and cost).
+ * A non-idempotent node is capped at a single attempt regardless of maxAttempts.
+ */
+function retryDecision(
+  node: Workflow["nodes"][number],
+  attempt: number,
+  err: unknown,
+  timedOut: boolean,
+): { retry: boolean; waitMs: number; reason: string } {
+  if (attempt >= node.retry.maxAttempts) return { retry: false, waitMs: 0, reason: "max-attempts" };
+  if (!node.idempotent) return { retry: false, waitMs: 0, reason: "not-idempotent" };
+
+  const transient =
+    timedOut || (err instanceof AdapterError ? err.retryable : false);
+  if (!transient) return { retry: false, waitMs: 0, reason: "non-retryable-error" };
+
+  // Backoff: honor a server Retry-After, else exponential on the node's base
+  // backoff, with bounded full jitter and a hard ceiling.
+  const serverWait = err instanceof AdapterError ? err.retryAfterMs : undefined;
+  const base = node.retry.backoffMs || 0;
+  const expo = base > 0 ? base * 2 ** (attempt - 1) : 0;
+  const jittered = expo > 0 ? Math.floor(Math.random() * expo) : 0;
+  const waitMs = Math.min(30_000, Math.max(serverWait ?? 0, jittered));
+  return { retry: true, waitMs, reason: timedOut ? "timeout" : "transient" };
 }
 
 async function runWithRetries(
@@ -330,14 +374,16 @@ async function runWithRetries(
       clearTimeout(timer);
       abortAll.signal.removeEventListener("abort", onGlobalAbort);
       if (abortAll.signal.aborted) return { attempts: attempt, cancelled: true };
-      const aborted = timeoutCtrl.signal.aborted;
-      lastError = aborted
+      const timedOut = timeoutCtrl.signal.aborted;
+      lastError = timedOut
         ? `Timed out after ${node.timeoutMs}ms`
         : err instanceof AdapterError
           ? `${err.code}: ${err.message}`
           : (err as Error).message;
-      if (attempt < max) {
-        await delay(node.retry.backoffMs);
+
+      const decision = retryDecision(node, attempt, err, timedOut);
+      if (decision.retry) {
+        if (decision.waitMs > 0) await delay(decision.waitMs, abortAll.signal);
         continue;
       }
       return { error: lastError, attempts: attempt };
@@ -346,7 +392,16 @@ async function runWithRetries(
   return { error: lastError, attempts: max };
 }
 
-const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Cancellable delay (resolves early if the run is aborted). */
+const delay = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((r) => {
+    if (signal?.aborted) return r();
+    const t = setTimeout(r, ms);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(t);
+      r();
+    }, { once: true });
+  });
 
 /** Length of the union of [startedAt, endedAt] execution intervals, in ms. */
 function unionBusyMs(spans: NodeSpan[]): number {
@@ -400,14 +455,10 @@ function aggregateUsage(spans: NodeSpan[]): Usage {
 }
 
 /** Build the run-level execution provenance summary from finished spans. */
-export function summarizeExecution(spans: NodeSpan[], outputs: Map<string, unknown>): {
-  adapters: string[];
-  providers: string[];
-  liveNodeCount: number;
-  demoNodeCount: number;
-  liveExecution: boolean;
-  sourceCount: number;
-} {
+export function summarizeExecution(
+  spans: NodeSpan[],
+  outputs: Map<string, unknown>,
+): ExecutionSummary {
   const adapters = new Set<string>();
   const providers = new Set<string>();
   let liveNodeCount = 0;
@@ -424,12 +475,19 @@ export function summarizeExecution(spans: NodeSpan[], outputs: Map<string, unkno
     const srcs = (out as any)?.sources;
     if (Array.isArray(srcs)) for (const src of srcs) if (src?.sourceId) sourceIds.add(src.sourceId);
   }
+  // Mode reflects ALL contributing node provenance: live only, demo only, or a
+  // genuine blend. (A formatter that re-assembles live data is tagged live by
+  // the adapter, so a fully-live run is not mislabelled MIXED by its formatter.)
+  const mixedExecution = liveNodeCount > 0 && demoNodeCount > 0;
+  const provenanceMode = mixedExecution ? "mixed" : liveNodeCount > 0 ? "live" : "demo";
   return {
     adapters: [...adapters].sort(),
     providers: [...providers].sort(),
     liveNodeCount,
     demoNodeCount,
     liveExecution: liveNodeCount > 0,
+    mixedExecution,
+    provenanceMode,
     sourceCount: sourceIds.size,
   };
 }

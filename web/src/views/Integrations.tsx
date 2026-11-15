@@ -87,19 +87,40 @@ export function IntegrationsView({ config }: { config: AppConfig | null }) {
           hidden model context or universal transparent interception.
         </p>
         <table className="matrix">
-          <thead><tr><th>Host</th><th>Role</th><th>Integration path</th><th>Notes</th></tr></thead>
+          <thead><tr><th>Host</th><th>Role</th><th>Tested</th><th>Integration path</th><th>Notes</th></tr></thead>
           <tbody>
             {data.hosts.map((h) => (
               <tr key={h.host}>
                 <td style={{ color: "var(--text-0)" }}>{h.host}</td>
                 <td><span className={`role ${h.role}`}>{h.role}</span></td>
-                <td className="faint" style={{ fontSize: 12 }}>{h.integration}</td>
+                <td>
+                  <Badge tone={h.verification === "verified" ? "ok" : h.verification === "expected" ? "warn" : "idle"}>
+                    {h.verification ?? "untested"}
+                  </Badge>
+                </td>
+                <td className="faint" style={{ fontSize: 12 }} title={h.verifiedWith}>{h.integration}</td>
                 <td className="faint" style={{ fontSize: 11.5 }}>{h.notes}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        <p className="mono faint" style={{ fontSize: 10.5, marginBottom: 0 }}>
+          “Tested” = exercised end-to-end here. A model supporting MCP elsewhere does NOT imply its chat app can install this server.
+          Adapters are direct API integrations with server-level credentials — not access to a host model's subscription or private context.
+        </p>
       </Panel>
+
+      {config?.deployment && !config.deployment.multiUserReady && (
+        <Panel title="DEPLOYMENT READINESS" style={{ marginBottom: 16 }}>
+          <div className="row" style={{ gap: 8, marginBottom: 6 }}>
+            <span className="mono muted">hosted multi-user</span>
+            <Badge tone="warn">not ready</Badge>
+          </div>
+          <p className="mono faint" style={{ fontSize: 11, marginBottom: 0, lineHeight: 1.6 }}>
+            {config.deployment.note}
+          </p>
+        </Panel>
+      )}
 
       <div className="grid" style={{ gridTemplateColumns: "1fr 1fr" }}>
         <Panel title="OPENTELEMETRY / SIGNOZ">

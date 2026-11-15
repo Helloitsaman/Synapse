@@ -63,24 +63,38 @@ export interface RunResult {
   answer: string; title?: string; document: unknown;
   citations: Citation[]; sources: SourceRecord[]; provenance: Provenance;
 }
+export type ProvenanceMode = "live" | "demo" | "mixed";
+
 export interface ExecutionSummary {
   adapters: string[]; providers: string[];
-  liveNodeCount: number; demoNodeCount: number; liveExecution: boolean; sourceCount: number;
+  liveNodeCount: number; demoNodeCount: number; liveExecution: boolean;
+  mixedExecution: boolean; provenanceMode: ProvenanceMode; sourceCount: number;
+}
+
+export type CostLabel = "estimated" | "unavailable";
+export interface CostEstimate {
+  usd: number | null; label: CostLabel; pricingSource: string; modelMatched: boolean; model?: string;
+}
+
+export interface RunFingerprint {
+  workflowId: string; workflowVersion: string; irVersion: string;
+  inputsHash: string; configHash: string; adapters: string[]; models: string[];
+  mode: RunMode; concurrency: number;
 }
 
 export interface RunRecord {
   id: string; workflowId: string; workflowVersion: string; irVersion: string;
   mode: RunMode; concurrency: number; status: RunStatus; createdAt: string;
   startedAt?: number; endedAt?: number; totalMs: number; overheadMs: number;
-  spans: NodeSpan[]; usage: Usage; estimatedCostUsd: number;
+  spans: NodeSpan[]; usage: Usage; estimatedCostUsd: number | null; cost: CostEstimate;
   appliedTransformations: string[]; validation?: ValidationResult; error?: string;
-  execution?: ExecutionSummary; result?: RunResult;
+  execution?: ExecutionSummary; result?: RunResult; fingerprint?: RunFingerprint;
 }
 
 export interface RunSummary {
   id: string; workflowId: string; mode: RunMode; status: RunStatus; createdAt: string;
   totalMs: number; overheadMs: number; validationPassed: boolean | null;
-  estimatedCostUsd: number; usage: Usage;
+  estimatedCostUsd: number | null; usage: Usage;
 }
 
 export interface TransformationDecision {
@@ -97,12 +111,38 @@ export interface OptimizationPlan {
 
 export interface LabeledValue {
   value: number; unit: string;
-  label: "measured" | "estimated" | "simulated" | "provider-reported" | "unavailable";
+  label: "measured" | "estimated" | "simulated" | "provider-reported" | "unavailable" | "none";
+}
+
+export interface ComparabilityReport {
+  comparable: boolean; sameWorkflow: boolean; sameWorkflowVersion: boolean;
+  sameInputs: boolean; sameConfig: boolean; mismatches: string[]; fingerprintMissing: boolean;
+}
+export interface AnswerComparison {
+  baselineProvenance?: Provenance; optimizedProvenance?: Provenance;
+  baselineCitations: string[]; optimizedCitations: string[];
+  similarity: number; sameCitedSources: boolean; label: "estimate"; note: string;
 }
 
 export interface RunComparison {
   baseline: RunRecord; optimized: RunRecord; sampleCount: number;
+  comparability: ComparabilityReport; validationMatch: boolean; answer?: AnswerComparison;
   metrics: Record<string, LabeledValue>; note: string;
+}
+
+export interface Distribution {
+  samples: number; min: number; median: number; p95: number; max: number;
+  mean: number; stdev: number; unit: string; label: "measured"; values: number[];
+}
+export interface BenchmarkModeResult {
+  mode: RunMode; runIds: string[]; failures: number; totalMs: Distribution; overheadMs: Distribution;
+}
+export interface BenchmarkResult {
+  workflowId: string; workflowVersion: string; repetitions: number;
+  order: Array<{ mode: RunMode; runId: string; totalMs: number; status: RunStatus }>;
+  baseline: BenchmarkModeResult; optimized: BenchmarkModeResult;
+  speedupMedian: number; comparability: ComparabilityReport;
+  baselineKind: "synapse-sequential-graph"; note: string;
 }
 
 export interface Integrations {
@@ -115,7 +155,10 @@ export interface Integrations {
     };
     availability: { available: boolean; reason?: string };
   }>;
-  hosts: Array<{ host: string; role: string; integration: string; notes: string }>;
+  hosts: Array<{
+    host: string; role: string; integration: string; notes: string;
+    verification?: "verified" | "expected" | "untested"; verifiedWith?: string;
+  }>;
   telemetry: { enabled: boolean; endpoint: string | null; serviceName: string; started: boolean };
   live?: { modelAdapters: string[]; searchAvailable: boolean; researchReady: boolean };
 }
@@ -123,7 +166,12 @@ export interface Integrations {
 export interface AppConfig {
   schemaVersion: string; adapterContractVersion: string;
   telemetry: { enabled: boolean; endpoint: string | null; serviceName: string; started: boolean };
-  privacy: { redactBodies: boolean; telemetryMetadataOnly: boolean; runContextEphemeral: boolean; retention: string };
+  privacy: {
+    redactBodies: boolean; telemetryMetadataOnly: boolean; runContextEphemeral: boolean;
+    persistSourceContent?: boolean; retention: string;
+  };
+  pricing?: { source: string; note: string };
   demoMode: boolean;
   live?: { modelAdapters: string[]; searchAvailable: boolean; researchReady: boolean };
+  deployment?: { multiUserReady: boolean; note: string };
 }

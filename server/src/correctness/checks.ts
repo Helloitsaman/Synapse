@@ -111,8 +111,59 @@ const researchDocChecker: Checker = (ctx) => {
     detail: `${mentioned}/${topicTerms.length} topic term(s) present (heuristic estimate)`,
   });
 
+  // Claim-to-evidence support — lexical overlap between each citing section and
+  // the source(s) it cites. This is an ESTIMATE of grounding strength only: it
+  // does NOT verify a source actually supports a claim, nor that the claim is
+  // true. A low score flags weak grounding worth human/LLM-judge review; it is
+  // never treated as a factuality guarantee.
+  const sourceText = new Map<string, string>();
+  for (const s of sources) {
+    sourceText.set(s.sourceId, `${s.title} ${s.snippet} ${s.content ?? ""}`.toLowerCase());
+  }
+  const sectionsWithCites = (doc?.sections ?? []).filter(
+    (s: any) => s.body && Array.isArray(s.sourceIds) && s.sourceIds.length > 0,
+  );
+  let supported = 0;
+  let evaluated = 0;
+  for (const sec of sectionsWithCites) {
+    const bodyWords = termSet(sec.body);
+    for (const id of sec.sourceIds as string[]) {
+      evaluated++;
+      const srcWords = termSet(sourceText.get(id) ?? "");
+      if (overlap(bodyWords, srcWords) >= 0.08) supported++;
+    }
+  }
+  const supportRatio = evaluated === 0 ? 1 : supported / evaluated;
+  checks.push({
+    id: "claim-support-heuristic",
+    category: "estimate",
+    description:
+      "Heuristic ESTIMATE: each citing section shares vocabulary with the source it cites (grounding strength, NOT factual verification)",
+    required: false,
+    passed: supportRatio >= 0.5,
+    detail:
+      evaluated === 0
+        ? "no cited sections to evaluate"
+        : `${supported}/${evaluated} citation(s) show lexical support (ratio ${supportRatio.toFixed(2)}; estimate only — not a factuality check)`,
+  });
+
   return checks;
 };
+
+/** Meaningful terms (length ≥ 4) of a text, as a set. */
+function termSet(text: string): Set<string> {
+  const s = new Set<string>();
+  for (const m of String(text ?? "").toLowerCase().matchAll(/[a-z0-9]{4,}/g)) s.add(m[0]);
+  return s;
+}
+
+/** Fraction of a section's terms that also appear in a source. */
+function overlap(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const w of a) if (b.has(w)) inter++;
+  return inter / a.size;
+}
 
 /** Generic fallback: at least one leaf produced a non-null output. */
 const genericChecker: Checker = (ctx) => {

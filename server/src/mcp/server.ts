@@ -22,23 +22,31 @@ function asToolError(error: unknown) {
   return { isError: true, content: [{ type: "text" as const, text: message }] };
 }
 
-/** Human summary of a run record emphasizing provenance (live vs demo). */
+/** Human summary of a run record emphasizing provenance (live/demo/mixed). */
 function formatRunSummary(run: any): string {
   const lines: string[] = [];
-  const live = run?.execution?.liveExecution;
+  const mode = (run?.execution?.provenanceMode ?? (run?.execution?.liveExecution ? "live" : "demo")) as string;
   lines.push(`Run ${run.id}: ${run.status} (${run.mode} mode).`);
   if (run?.execution) {
     const e = run.execution;
     lines.push(
-      `Execution: ${live ? "LIVE" : "DEMO"} — adapters [${(e.adapters ?? []).join(", ")}]` +
+      `Execution: ${mode.toUpperCase()} — adapters [${(e.adapters ?? []).join(", ")}]` +
         (e.providers?.length ? `, providers [${e.providers.join(", ")}]` : "") +
+        `, live/demo nodes ${e.liveNodeCount ?? 0}/${e.demoNodeCount ?? 0}` +
         `, ${e.sourceCount ?? 0} source(s) retrieved.`,
     );
+    if (mode === "mixed") {
+      lines.push("  ⚠ MIXED: part of this output came from demo adapters — see node provenance.");
+    }
   }
   if (run?.usage) {
+    const cost =
+      run.estimatedCostUsd == null
+        ? "unknown (provider reported no usage; not $0)"
+        : `~$${run.estimatedCostUsd} (estimated, not a provider charge)`;
     lines.push(
       `Usage: ${run.usage.calls} call(s), ${run.usage.inputTokens + run.usage.outputTokens} tokens ` +
-        `(${run.usage.source}); cost ~$${run.estimatedCostUsd ?? 0} (estimated).`,
+        `(${run.usage.source}); cost ${cost}.`,
     );
   }
   lines.push(`Latency: total ${run.totalMs}ms (measured), SYNAPSE overhead ${run.overheadMs}ms (measured).`);
@@ -251,7 +259,55 @@ export function createSynapseMcpServer(options: SynapseMcpOptions = {}): McpServ
       try {
         const query = new URLSearchParams({ baseline: baselineRunId, optimized: optimizedRunId });
         const data = await request(`/compare?${query.toString()}`);
-        return asToolResult(data, "Run comparison ready. Metrics include measured, estimated, or simulated provenance labels.");
+        return asToolResult(
+          data,
+          data?.comparability?.comparable === false
+            ? `Run comparison ready, but the runs are NOT a matched pair (${(data.comparability.mismatches ?? []).join("; ")}). Treat the delta cautiously.`
+            : "Run comparison ready (matched pair). Metrics carry measured/estimated/simulated/unavailable labels.",
+        );
+      } catch (error) {
+        return asToolError(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "synapse_benchmark_workflow",
+    {
+      title: "Benchmark a SYNAPSE workflow (paired, repeated)",
+      description:
+        "Run a saved workflow N times in baseline AND optimized mode (interleaved) against the same inputs, and return measured distributions (median, p95, spread, failures). Baseline = sequential graph execution, NOT a host-native chat prompt. Execution may call configured providers; only call when the user requests a benchmark.",
+      inputSchema: {
+        workflowId: z.string().min(1).max(120),
+        repetitions: z.number().int().min(1).max(10).describe("Runs per mode (1-10)."),
+        concurrency: z.number().int().min(1).max(16).optional(),
+        workflowInputsJson: z.string().max(32_768).optional().describe("Optional JSON object of workflow inputs, such as topic."),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
+    },
+    async ({ workflowId, repetitions, concurrency, workflowInputsJson }) => {
+      try {
+        let workflowInputs: unknown;
+        if (workflowInputsJson) {
+          try {
+            workflowInputs = JSON.parse(workflowInputsJson);
+          } catch {
+            return asToolError(new Error("workflowInputsJson is not valid JSON."));
+          }
+          if (!workflowInputs || typeof workflowInputs !== "object" || Array.isArray(workflowInputs)) {
+            return asToolError(new Error("workflowInputsJson must encode a JSON object."));
+          }
+        }
+        const data = await request("/benchmark", {
+          method: "POST",
+          body: JSON.stringify({ workflowId, repetitions, concurrency, workflowInputs }),
+        });
+        const summary =
+          `Benchmark: ${data.repetitions} run(s)/mode. ` +
+          `Baseline median ${data.baseline?.totalMs?.median}ms (p95 ${data.baseline?.totalMs?.p95}ms), ` +
+          `Optimized median ${data.optimized?.totalMs?.median}ms (p95 ${data.optimized?.totalMs?.p95}ms), ` +
+          `median speedup ${data.speedupMedian}x. Distributions are measured; not a significance test.`;
+        return asToolResult(data, summary);
       } catch (error) {
         return asToolError(error);
       }
